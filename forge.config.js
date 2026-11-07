@@ -21,10 +21,9 @@ module.exports = {
     {
       name: '@electron-forge/maker-squirrel',
       config: {
-        // Installer exe icon; iconUrl is shown in Add/Remove Programs and must
-        // be a public https URL to an .ico (the committed file on GitHub)
+        // Installer exe icon. iconUrl (Add/Remove Programs icon) is omitted:
+        // it requires a public https URL, which Local Edition does not have.
         setupIcon: 'assets/icon.ico',
-        iconUrl: 'https://raw.githubusercontent.com/cuculhart/teaspoon-ide/main/assets/icon.ico',
       },
     },
     {
