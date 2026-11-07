@@ -439,5 +439,12 @@
   "Invalid conversation id": "会話IDが無効です",
   "Invalid payload": "ペイロードが無効です",
   "Invalid language code": "言語コードが無効です",
-  "Invalid theme": "テーマが無効です"
+  "Invalid theme": "テーマが無効です",
+  "About Teaspoon IDE Local Edition": "Teaspoon IDE Local Edition について",
+  "Offline-first, local-only AI IDE (Japanese)": "オフライン優先・ローカル完結の AI IDE（日本語）",
+  "Ollama is not reachable. Start the Ollama app or run ollama serve, and check Settings.": "Ollama に接続できません。Ollama アプリを起動するか ollama serve を実行し、設定を確認してください。",
+  "Ollama is not reachable - check Settings": "Ollama に接続できません - 設定を確認してください",
+  "Ollama": "Ollama",
+  "All AI requests go to the Ollama server on this machine (localhost:11434). Nothing leaves the computer.": "すべての AI リクエストはこのマシン上の Ollama サーバー（localhost:11434）に送信されます。データが外部に出ることはありません。",
+  "Ollama (local AI)": "Ollama（ローカル AI）"
 }

@@ -35,11 +35,11 @@ module.exports = {
       name: '@electron-forge/maker-deb',
       config: {
         options: {
-          // Packaged binary is named after productName ("Teaspoon"), not the
+          // Packaged binary is named after productName, not the
           // npm package name that maker-deb looks for by default
-          bin: 'Teaspoon',
+          bin: 'Teaspoon IDE Local Edition',
           icon: 'assets/icon.png',
-          homepage: 'https://github.com/cuculhart/teaspoon-ide',
+          homepage: '',
           section: 'devel',
           genericName: 'AI Coding Assistant',
           categories: ['Development', 'IDE'],

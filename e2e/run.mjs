@@ -1,13 +1,12 @@
 // Adversarial E2E tests for Teaspoon IDE (res-and-dev.md), driven by
 // Playwright's Electron support.
 //
-// The Gemini API is stubbed by a local HTTP server: since v1.4.0 the app's
-// Gemini calls run in the Electron main process (LLM relay), which
-// page.route() cannot intercept, so each profile's llm_proxy_url endpoint
-// binding is pointed at the mock server. The "model" emits scripted
-// command output deterministically - no real API key, no network calls.
-// Each test launches the app with a private --user-data-dir, so the user's
-// real profile (API keys, chat history) is never touched.
+// The local Ollama endpoint is stubbed with page.route(): the app's
+// /api/chat and /api/tags calls are renderer fetches to
+// localhost:11434, which Playwright can intercept and fulfill with
+// scripted NDJSON replies - no real Ollama server, no network calls.
+// Each test launches the app with a private --user-data-dir, so the
+// user's real profile (settings, chat history) is never touched.
 //
 // Run: node e2e/run.mjs   (or: npm run test:e2e)
 // Requires the built/vite dev pipeline only - no `npm run build` needed.
@@ -49,61 +48,48 @@ async function waitForServer(timeoutMs = 60000) {
   throw new Error(`vite dev server not ready at ${BASE}`)
 }
 
-const geminiReply = (text) => JSON.stringify({
-  candidates: [{
-    content: { role: 'model', parts: [{ text }] },
-    finishReason: 'STOP',
-    index: 0,
-  }],
-  usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10, totalTokenCount: 20 },
-})
-
-// Mock LLM endpoint. The app's requests go through the main-process relay,
-// out of reach of page.route, so the profile's llm_proxy_url points here
-// and the key is sent as a Bearer credential the server ignores. Request
-// bodies are captured per test so it can assert that a secret or file
-// content never leaves the app.
-let mockPort = 0
+// Mock Ollama endpoint. The app's /api/chat and /api/tags calls are plain
+// renderer fetches to http://localhost:11434, which page.route() can
+// intercept. Request bodies are captured per test so it can assert that
+// a secret or file content never leaves the app.
 const mockState = { replies: [], captured: [], delayMs: 0 }
-const mockLog = path.join(os.tmpdir(), 'tsp-e2e-mock.log')
 
-function startMockServer() {
-  fs.writeFileSync(mockLog, '')
-  const server = http.createServer((req, res) => {
-    let body = ''
-    req.on('data', (c) => { body += c })
-    req.on('end', () => {
-      fs.appendFileSync(mockLog, `${req.method} ${req.url} bodyLen=${body.length}\n`)
-      const respond = () => {
-        if (req.method === 'GET') {
-          // llm-list-models health/model probe - return an empty list
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ models: [] }))
-          return
-        }
-        mockState.captured.push(body)
-        const text = mockState.replies.length ? mockState.replies.shift() : 'E2E_DONE'
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(geminiReply(text))
-      }
-      if (mockState.delayMs) setTimeout(respond, mockState.delayMs)
-      else respond()
+// One assistant message as Ollama's NDJSON stream: a content chunk then a
+// done:true terminator (eval counts mirror real responses).
+const ollamaReply = (text) =>
+  JSON.stringify({ message: { role: 'assistant', content: text }, done: false }) + '\n' +
+  JSON.stringify({ done: true, prompt_eval_count: 10, eval_count: 10 }) + '\n'
+
+// Install the intercepts on a page. Routes survive reloads, so this only
+// needs to run once per launch - before the first reload in launchApp.
+async function installOllamaMock(page) {
+  await page.route('**/api/tags', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ models: [{ name: 'gemma4:e4b' }] }),
+    }))
+  await page.route('**/api/chat', async (route) => {
+    const body = route.request().postData() || ''
+    mockState.captured.push(body)
+    const text = mockState.replies.length ? mockState.replies.shift() : 'E2E_DONE'
+    const respond = () => route.fulfill({
+      status: 200,
+      contentType: 'application/x-ndjson',
+      body: ollamaReply(text),
     })
-  })
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      mockPort = server.address().port
-      resolve(server)
-    })
+    if (mockState.delayMs) setTimeout(respond, mockState.delayMs)
+    else await respond()
   })
 }
 
-// Point the shared mock server at this test's reply queue / capture array.
-async function mockGemini(page, replies, captured, { delayMs = 0 } = {}) {
+// Point the shared mock at this test's reply queue / capture array.
+async function mockModel(page, replies, captured, { delayMs = 0 } = {}) {
   mockState.replies = replies
   mockState.captured = captured
   mockState.delayMs = delayMs
 }
+
 
 async function launchApp({ profileDir, focus = false }) {
   const args = [mainJs, `--user-data-dir=${profileDir}`]
@@ -140,19 +126,15 @@ async function launchApp({ profileDir, focus = false }) {
   page.on('framenavigated', (f) => {
     if (f === page.mainFrame()) fs.appendFileSync(errLog, `[nav ${Date.now()}] ${f.url()}\n`)
   })
-  await page.addInitScript(({ focus, proxyUrl }) => {
-    // Both values are migrated into the main-process secret store on first
-    // load (configService.migrateLegacySecret): gemini_api_key becomes the
-    // relay credential, llm_proxy_url redirects it to the mock server.
-    localStorage.setItem('gemini_api_key', 'pw-e2e-key')
-    localStorage.setItem('llm_proxy_url', proxyUrl)
-    localStorage.setItem('llm_provider', 'gemini')
-    localStorage.setItem('language', 'en')
+  await installOllamaMock(page)
+  await page.addInitScript(({ focus }) => {
+    // Local Edition: no API keys or provider settings exist. The Ollama
+    // endpoint is fixed and intercepted by page.route above.
     localStorage.setItem('auto_summarize', '0')
     localStorage.removeItem('last_project_path')
     localStorage.removeItem('last_no_project_conv')
     localStorage.setItem('chat_focus', focus ? '1' : '0')
-  }, { focus, proxyUrl: `http://127.0.0.1:${mockPort}` })
+  }, { focus })
   await page.reload()
   // Vite can force a full page reload shortly after connect (dependency
   // re-optimization, ws reconnect) - a navigation mid-test destroys the
@@ -218,11 +200,8 @@ async function dumpDiag() {
   if (!lastPage || lastPage.isClosed()) return
   try {
     const d = await lastPage.evaluate(() => ({
-      secretsHas: window.electronAPI?.secretsHas ? window.electronAPI.secretsHas('gemini_api_key') : 'no-api',
-      lsKey: localStorage.getItem('gemini_api_key'),
-      lsProvider: localStorage.getItem('llm_provider'),
-      lsProxy: localStorage.getItem('llm_proxy_url'),
       sendBtn: document.querySelector('.send-button')?.textContent,
+      modelBadge: document.querySelector('.model-badge')?.textContent,
     }))
     console.log(`     [diag] ${JSON.stringify(d)}`)
   } catch (e) {
@@ -240,11 +219,11 @@ test('G-1  no-project absolute READ_FILE is rejected; content never sent', async
   const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
   try {
     const reqs = []
-    await mockGemini(page, [`// READ_FILE: ${fwd(sentinel)}`, 'G1_DONE'], reqs)
+    await mockModel(page, [`// READ_FILE: ${fwd(sentinel)}`, 'G1_DONE'], reqs)
     await sendChat(page, 'read the file for me')
     await waitForMarker(page, 'G1_DONE')
     const msgs = await messagesText(page)
-    assert.ok(msgs.includes('No project is open'), 'rejection note missing:\n' + msgs)
+    assert.ok(msgs.includes('プロジェクトが開かれていません'), 'rejection note missing:\n' + msgs)
     assert.ok(
       !reqs.join('\n').includes('SENTINEL_SECRET_G1'),
       'file content was transmitted to the model endpoint',
@@ -262,11 +241,11 @@ test('G-2  ../ traversal READ_FILE is rejected with a project open', async () =>
   try {
     await openProject(page, proj)
     const reqs = []
-    await mockGemini(page, ['// READ_FILE: ../sentinel.txt', 'G2_DONE'], reqs)
+    await mockModel(page, ['// READ_FILE: ../sentinel.txt', 'G2_DONE'], reqs)
     await sendChat(page, 'read ../sentinel.txt')
     await waitForMarker(page, 'G2_DONE')
     const msgs = await messagesText(page)
-    assert.ok(msgs.includes('outside the project root'), 'traversal not rejected:\n' + msgs)
+    assert.ok(msgs.includes('プロジェクトルートの外'), 'traversal not rejected:\n' + msgs)
     assert.ok(
       !reqs.join('\n').includes('SENTINEL_SECRET_G2'),
       'file content was transmitted to the model endpoint',
@@ -285,7 +264,7 @@ test('B-4  ../../ WRITE_FILE is rejected; no file created', async () => {
   try {
     await openProject(page, proj)
     const reqs = []
-    await mockGemini(
+    await mockModel(
       page,
       [`// WRITE_FILE: ../../${escapeName}\npwned\n// END_WRITE_FILE`, 'B4_DONE'],
       reqs,
@@ -293,7 +272,7 @@ test('B-4  ../../ WRITE_FILE is rejected; no file created', async () => {
     await sendChat(page, 'write a file')
     await waitForMarker(page, 'B4_DONE')
     const msgs = await messagesText(page)
-    assert.ok(msgs.includes('outside the project root'), 'traversal not rejected:\n' + msgs)
+    assert.ok(msgs.includes('プロジェクトルートの外'), 'traversal not rejected:\n' + msgs)
     assert.strictEqual(await page.locator('.file-edit-approval').count(), 0,
       'rejected write reached the approval dialog')
     assert.ok(!fs.existsSync(escaped), `escape file exists: ${escaped}`)
@@ -309,7 +288,7 @@ test('A-3  nested command line inside WRITE_FILE body is not re-parsed', async (
   try {
     await openProject(page, proj)
     const reqs = []
-    await mockGemini(page, [
+    await mockModel(page, [
       '// WRITE_FILE: guide.md\nUsage example:\n// WRITE_FILE: evil.md\nend of guide\n// END_WRITE_FILE',
       'A3_DONE',
     ], reqs)
@@ -338,14 +317,14 @@ test('A-2  unclosed ::: block yields retry feedback and no write', async () => {
   try {
     await openProject(page, proj)
     const reqs = []
-    await mockGemini(page, [
+    await mockModel(page, [
       ':::WRITE_FILE: a.md\nunterminated body\nand trailing prose',
       'A2_DONE',
     ], reqs)
     await sendChat(page, 'create a.md')
     await waitForMarker(page, 'A2_DONE')
     const msgs = await messagesText(page)
-    assert.ok(msgs.includes('Incomplete command block'), 'no malformed-block feedback:\n' + msgs)
+    assert.ok(msgs.includes('不完全なコマンドブロック'), 'no malformed-block feedback:\n' + msgs)
     assert.ok(!fs.existsSync(path.join(proj, 'a.md')), 'a.md was created from a malformed block')
     assert.ok(reqs.length >= 2 && reqs[1].includes('Malformed'),
       'model was not told the block was malformed')
@@ -358,7 +337,7 @@ test('B-1  create-project modal once per turn; cancel rejects writes', async () 
   const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
   try {
     const reqs = []
-    await mockGemini(page, [
+    await mockModel(page, [
       '// WRITE_FILE: a.txt\naaa\n// END_WRITE_FILE\n// WRITE_FILE: b.txt\nbbb\n// END_WRITE_FILE',
       'B1_DONE',
     ], reqs)
@@ -367,7 +346,7 @@ test('B-1  create-project modal once per turn; cancel rejects writes', async () 
     await page.click('.create-project-modal .dialog-actions button >> nth=1') // Cancel
     await waitForMarker(page, 'B1_DONE')
     const msgs = await messagesText(page)
-    assert.ok(msgs.includes('No project is open'), 'writes were not rejected:\n' + msgs)
+    assert.ok(msgs.includes('プロジェクトが開かれていません'), 'writes were not rejected:\n' + msgs)
     assert.strictEqual(await page.locator('.create-project-modal').count(), 0,
       'modal reappeared after cancel')
   } finally { await app.close() }
@@ -379,7 +358,7 @@ test('E-1  assistant markup is sanitized (no script/event handlers run)', async 
   try {
     await page.evaluate(() => { window.__xss = 0; window.__xss2 = 0 })
     const reqs = []
-    await mockGemini(page, [
+    await mockModel(page, [
       'Here: <img src=x onerror="window.__xss=1"> <script>window.__xss2=1</script> E1_DONE',
     ], reqs)
     await sendChat(page, 'show me some html')
@@ -397,7 +376,7 @@ test('E-3  user message renders as plain text, not markdown', async () => {
   const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
   try {
     const reqs = []
-    await mockGemini(page, ['E3_DONE'], reqs)
+    await mockModel(page, ['E3_DONE'], reqs)
     await sendChat(page, '# heading **bold**')
     await waitForMarker(page, 'E3_DONE')
     const userMsg = page.locator('.chat-message.user .message-text').last()
@@ -413,7 +392,7 @@ test('D-1a current user message appears exactly once in the request', async () =
   const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
   try {
     const reqs = []
-    await mockGemini(page, ['UNIQ_DONE'], reqs)
+    await mockModel(page, ['UNIQ_DONE'], reqs)
     await sendChat(page, 'E2E_UNIQ_PHRASE_987')
     await waitForMarker(page, 'UNIQ_DONE')
     const count = (reqs[0] ?? '').split('E2E_UNIQ_PHRASE_987').length - 1
@@ -428,7 +407,7 @@ test('D-1b truncated history is disclosed in the prompt', async () => {
   const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
   try {
     const reqs = []
-    await mockGemini(page, [], reqs) // every reply defaults to E2E_DONE
+    await mockModel(page, [], reqs) // every reply defaults to E2E_DONE
     // 12 turns = 24 stored messages > 20-window on the last send.
     for (let i = 0; i < 12; i++) {
       await page.fill('.chat-input textarea', `msg ${i}`)
@@ -451,7 +430,7 @@ test('F-3  chat focus toggled during streaming keeps generating', async () => {
   const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
   try {
     const reqs = []
-    await mockGemini(page, ['F3_DONE'], reqs, { delayMs: 2000 })
+    await mockModel(page, ['F3_DONE'], reqs, { delayMs: 2000 })
     await sendChat(page, 'hello')
     await page.waitForSelector('.loading-dots', { timeout: 15000 })
     await page.click('button[title="Chat focus"]')
@@ -469,7 +448,7 @@ test('C-5  corrupt index.json rebuilds the conversation list', async () => {
   let histDir
   try {
     const reqs = []
-    await mockGemini(page, ['C5_SEED_DONE'], reqs)
+    await mockModel(page, ['C5_SEED_DONE'], reqs)
     await sendChat(page, 'e2e c5 seed message')
     await waitForMarker(page, 'C5_SEED_DONE')
     const userData = await app.evaluate(async ({ app }) => app.getPath('userData'))
@@ -551,7 +530,7 @@ test('R-1  dedup "unchanged" reply is backed by the retained payload', async () 
   try {
     await openProject(page, proj)
     const reqs = []
-    await mockGemini(page, [
+    await mockModel(page, [
       '// READ_FILE: sentinel.txt',
       '// READ_FILE: sentinel.txt',
       'R1_DONE',
@@ -590,10 +569,6 @@ async function main() {
   for (const f of [electronExe, viteBin, mainJs]) {
     if (!fs.existsSync(f)) throw new Error(`missing: ${f} (run npm install / build first)`)
   }
-
-  const mockServer = await startMockServer()
-  console.log(`mock LLM endpoint at http://127.0.0.1:${mockPort}`)
-  process.on('exit', () => mockServer.close())
 
   // Reuse an existing dev server if one is already running.
   let vite = null

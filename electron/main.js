@@ -184,7 +184,7 @@ function buildMenu() {
       label: t('Help'),
       submenu: [
         {
-          label: t('About Teaspoon IDE'),
+          label: t('About Teaspoon IDE Local Edition'),
           click: () => sendMenuAction('about'),
         },
       ],
@@ -205,7 +205,7 @@ async function createWindow() {
   const height = m ? +m[2] : 900
 
   mainWindow = new BrowserWindow({
-    title: 'Teaspoon IDE',
+    title: 'Teaspoon IDE Local Edition',
     width,
     height,
     // Windows uses the exe icon; this matters on Linux
@@ -291,7 +291,7 @@ function reportFatalError(err) {
     // ignore logging failure
   }
   try {
-    require('electron').dialog.showErrorBox('Teaspoon IDE failed to start', message)
+    require('electron').dialog.showErrorBox('Teaspoon IDE Local Edition failed to start', message)
   } catch (e) {
     // ignore dialog failure
   }
@@ -327,10 +327,12 @@ app.whenReady().then(async () => {
     return p
   })
 
-  // The renderer owns the language setting (localStorage) - it pushes
-  // changes here so menus and main-process dialogs/error strings follow.
-  ipcMain.on('set-language', (event, code) => {
-    i18n.loadLanguage(code)
+  // Japanese-only edition: the UI language is fixed, so the main process
+  // loads the ja dictionary once for menus/dialogs. The renderer still
+  // sends set-language on init - it is accepted but ignored below.
+  i18n.loadLanguage('ja')
+  ipcMain.on('set-language', () => {
+    i18n.loadLanguage('ja')
     buildMenu()
   })
 

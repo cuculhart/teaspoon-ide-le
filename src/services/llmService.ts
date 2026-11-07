@@ -1,17 +1,18 @@
-import { configService } from './configService'
-import { getProvider, type TokenUsage } from './providers'
+import type { TokenUsage } from './providers'
+import { getProvider } from './providers'
 
 // Pins a request to the provider/model captured when the user hit Send.
 // Without it, changing Settings mid-generation would silently retarget
-// later agent-loop steps to the new provider/model.
+// later agent-loop steps to the new model.
 export interface LlmPin {
   provider?: string
   model?: string
 }
 
 // Provider router: the UI talks to llmService, which looks the provider up
-// in the registry (providers.ts) and delegates to it. All providers share
-// the same sendMessage contract via their descriptor.
+// in the registry (providers.ts) and delegates to it. Local Edition has a
+// single provider (Ollama), so this is a thin pass-through kept for the
+// shared call signature.
 export const llmService = {
   isConfigured(): boolean {
     return getProvider().isConfigured()
@@ -27,7 +28,7 @@ export const llmService = {
     agent?: boolean,
     onUsage?: (usage: TokenUsage) => void,
   ): Promise<string> {
-    const provider = getProvider(pin?.provider ?? configService.getLlmProvider())
+    const provider = getProvider(pin?.provider)
     return provider.sendMessage({ message, context, history, onDelta, signal, model: pin?.model, agent, onUsage })
   },
 }

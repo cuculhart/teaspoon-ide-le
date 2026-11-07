@@ -1,12 +1,12 @@
 import { configService, ThemeMode } from './configService'
 
 export type ResolvedTheme =
-  'dark' | 'light' | 'quiet' | 'ocean' | 'console' | 'walnut' | 'heritage' | 'wine'
-  | 'fizz' | 'otegami' | 'float' | 'msx' | 'chaya' | 'coquette' | 'silver'
+  'dark' | 'light' | 'quiet' | 'heritage' | 'silver'
 
 // Themes whose UI is light - nativeTheme and the OS-level chrome must be
 // told 'light' for these even though their ids are custom.
-const LIGHT_THEMES: ResolvedTheme[] = ['light', 'quiet', 'heritage', 'otegami', 'float', 'coquette']
+// ('silver' is a dark theme despite the name - see index.css.)
+const LIGHT_THEMES: ResolvedTheme[] = ['light', 'quiet', 'heritage']
 
 const darkMediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
 

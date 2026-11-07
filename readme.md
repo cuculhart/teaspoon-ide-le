@@ -1,16 +1,20 @@
-# Teaspoon IDE
+# Teaspoon IDE Local Edition (Teaspoon LE)
 
-English | [日本語](README.ja.md)
+[日本語](README.ja.md)
 
 <p align="center">
-  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE — Standalone, Privacy-First AI IDE">
+  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE Local Edition — offline-first, local-only AI IDE">
 </p>
 
-A standalone Electron-based AI coding assistant that combines a file explorer, code editor, AI chat, Git operations, and a terminal in one app.
+**Teaspoon IDE Local Edition** is a fork of [Teaspoon IDE](https://github.com/cuculhart/teaspoon-ide): a standalone Electron-based AI coding assistant that combines a file explorer, code editor, AI chat, Git operations, and a terminal in one app — rebuilt for **offline, local-only operation**.
 
-The name **Teaspoon IDE** reflects the design goal: getting real work done on a teaspoon of tokens. The default context is just the file tree (path list), and the AI fetches file contents on demand via READ_FILE/GREP — keeping each message small.
+- **No API keys, no cloud, no BYOK.** The only AI backend is a local [Ollama](https://ollama.com) server on `localhost:11434`. Nothing leaves the machine — the app works with the LAN cable unplugged or Wi-Fi off.
+- **Japanese-only UI.** The interface, menus, dialogs, and AI replies default to Japanese.
+- **Corporate-friendly.** No accounts, no telemetry, no external endpoints to review — just Ollama (MIT) plus this app.
 
-The package and repository name is `teaspoon-ide`. The product/display name is **Teaspoon IDE**. (Formerly known as **Forger**.)
+The name **Teaspoon** reflects the design goal: getting real work done on a teaspoon of tokens. The default context is just the file tree (path list), and the AI fetches file contents on demand via READ_FILE/GREP — keeping each message small.
+
+This is a standalone fork: it does not track upstream releases.
 
 <video src="https://github.com/user-attachments/assets/867c8bcc-93aa-4ee4-90ef-efde5ed735e1" controls width="100%"></video>
 
@@ -72,10 +76,10 @@ Author: Cuculhart — Web Site: https://cuculhart.com
 
 ### Appearance & Settings
 
-- **Theme**: System (follows OS via nativeTheme) / Dark / Light, plus 12 named themes: Organic Light, Muted Ocean, Ancient Console, Walnut, Heritage, Rich Wine, Violet Fizz, Otegami, Soda Float, Modern Syntax eXtensible (MSX), Chaya, Coquette
+- **Theme**: System (follows OS via nativeTheme) / Dark / Light, plus office-appropriate named themes: Organic Light, Heritage, Silver Screen
 - **Font**: Family and size applied across the UI and Monaco
-- **LLM Provider**: Switch between Gemini API (cloud) and Ollama (local, offline) in Settings. Model selection and LiteLLM proxy supported. For Ollama, a CPU Threads cap keeps the PC responsive while a local model generates, and a Thinking selector forces reasoning on/off for supported models - both go through Ollama's native `/api/chat` options
-- **UI Language**: Switch in Settings > Appearance > Language. Add `lang/<code>.json` to contribute a language — keys are the English source strings
+- **Ollama (local AI)**: The only backend - talks to `localhost:11434`, endpoint is fixed. Model picker lists locally installed models (default: `gemma4:e4b`). Optional CPU Threads cap, Context Size (num_ctx), Temperature, and Thinking controls - all via Ollama's native `/api/chat` options
+- **UI Language**: Japanese only (fixed)
 - **Chat focus**: focus toggle in the chat header (⛶ to enter, ◫ to restore panes) or View > Toggle Chat Focus (Ctrl+Shift+B) hides the sidebar/editor/terminal so the chat fills the window; IDE panes return on menu actions that need them, and the mode is remembered across restarts
 - **Chat list**: while chat focus is on, a conversation rail appears beside the chat (list | conversation). Chats are persisted per conversation — including ones started with no project open — as JSON files under userData/chat-history; long chats are compacted into a rolling summary so requests stay within model context limits
 - **About**: Help > About Teaspoon IDE
@@ -99,40 +103,18 @@ Electron App
 │   ├── Terminal pane (xterm.js)
 │   └── Context management / i18n services
 └── LLM Integration
-    ├── Gemini API
-    ├── Ollama (local, offline)
-    ├── LiteLLM proxy (optional)
-    └── File-operation commands (agent loop)
+    └── Ollama on localhost:11434 (local, offline)
+        └── File-operation commands (agent loop)
 ```
 
-## Security Architecture
+## Security & Network Model
 
-Using a LiteLLM proxy is recommended for safe API-key management:
+Local Edition has **no cloud path at all**:
 
-```
-Teaspoon IDE → dummy API key → LiteLLM (e.g. VPS) → real API key → Google AI Studio
-```
-
-### Setting up the LiteLLM proxy
-
-1. **Set up a LiteLLM server** (e.g. on a VPS):
-```bash
-pip install litellm
-litellm --model gemini/gemini-3.8-flash --api_key YOUR_REAL_API_KEY
-```
-
-2. **Configure Teaspoon IDE**:
-   - Enable "Use Proxy" in Settings
-   - Enter the proxy URL (e.g. `http://your-vps:4000`)
-   - Enter a dummy API key (it is not actually used)
-
-3. **Benefits**:
-   - The real API key is never stored on the client
-   - Easy key rotation
-   - Usage monitoring and limits
-   - Unified access to multiple AI providers
-
-For fully offline operation, choose the **Ollama** provider — no API key or network access is needed at all.
+- The renderer talks only to `http://localhost:11434` (Ollama's `/api/chat` and `/api/tags`). There is no endpoint setting, no proxy setting, and no credential storage.
+- The Electron main process exposes no LLM relay, no secrets store, and no managed/organization mode — those upstream features were removed entirely.
+- Ollama's local API has no authentication, so keep it bound to `127.0.0.1` (the default). Do not expose port 11434 on the LAN.
+- For strict no-outbound environments, set `OLLAMA_NO_CLOUD=1` for the Ollama service and/or add a firewall rule blocking Ollama's outbound traffic. Model files must be pre-fetched on a connected machine and copied over (`ollama pull` needs connectivity once).
 
 ## Distribution Model
 
@@ -167,10 +149,9 @@ Implemented packaging work:
 - **Editor**: Monaco Editor
 - **Git**: simple-git
 - **Terminal**: node-pty + xterm.js
-- **LLM**: Gemini API / Ollama (local)
+- **LLM**: Ollama on localhost (local only)
 - **Build**: Vite + Electron Forge
 - **Settings**: ConfigService + localStorage
-- **Proxy**: LiteLLM (optional)
 - **Node.js**: v22 LTS recommended
 
 ## Getting Started
@@ -217,11 +198,9 @@ npm run dev
 
 ### Using AI Chat
 
-1. Open Settings (⚙️)
-2. Choose an LLM provider:
-   - **Gemini API**: Enter your API key and pick a model (default: gemini-3.8-flash). Optionally configure a LiteLLM proxy. The key is encrypted via the OS keychain and API calls run in the Electron main process - the renderer never sees the key
-   - **Ollama**: Start Ollama locally, then pick the endpoint and model (installed models are auto-detected). Optionally cap CPU Threads so generation leaves cores free for other work, and set Thinking (On/Off/Model default) for reasoning-capable models
-3. Send a message in the chat
+1. Install and start [Ollama](https://ollama.com) on the same machine, and pull a model (e.g. `ollama pull gemma4:e4b`)
+2. Open Settings (⚙️) > Ollama to confirm the connection and pick a model
+3. Send a message in the chat - replies default to Japanese
 
 ### Context Management
 

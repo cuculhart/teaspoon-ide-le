@@ -1,8 +1,8 @@
 {
-  "name": "teaspoon-ide",
-  "productName": "Teaspoon",
-  "version": "1.7.2",
-  "description": "Teaspoon IDE - Standalone Electron-based AI coding assistant (a teaspoon of tokens)",
+  "name": "teaspoon-ide-le",
+  "productName": "Teaspoon IDE Local Edition",
+  "version": "1.0.0",
+  "description": "Teaspoon IDE Local Edition - offline-first, Japanese-only Electron AI coding assistant powered by a local Ollama server",
   "main": "electron/main.js",
   "config": {},
   "scripts": {
@@ -23,9 +23,11 @@
     "electron",
     "ai",
     "editor",
-    "gemini"
+    "ollama",
+    "offline",
+    "japanese"
   ],
-  "author": "Teaspoon IDE contributors",
+  "author": "Teaspoon LE contributors",
   "license": "FSL-1.1-MIT",
   "overrides": {
     "monaco-editor": {

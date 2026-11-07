@@ -1,14 +1,16 @@
 import { useSyncExternalStore } from 'react'
-import { configService } from './configService'
 
 // Simple i18n: language files live in <resources>/lang (packaged) or
 // <projectRoot>/lang (dev) as <code>.json mapping English source -> localized.
 // English is the source language, so 'en' needs no file.
+// Local Edition is Japanese-only: the language is fixed to 'ja' and the
+// picker is gone - this service only loads the dictionary.
 const EVENT = 'teaspoon:language-changed'
+const FIXED_LANGUAGE = 'ja'
 
 class I18nService {
   private dict: Record<string, string> = {}
-  private code = 'en'
+  private code = FIXED_LANGUAGE
 
   get language(): string {
     return this.code
@@ -19,26 +21,18 @@ class I18nService {
     return this.dict[key] ?? key
   }
 
-  async setLanguage(code: string): Promise<void> {
-    this.code = code
-    configService.setLanguage(code)
-    // The main process keeps its own copy of the dict for menus,
-    // native dialogs, and IPC error strings.
-    window.electronAPI?.setLanguage?.(code)
-    if (code === 'en') {
-      this.dict = {}
-    } else {
-      const result = await window.electronAPI!.loadLanguage(code)
-      this.dict = result.success && result.dict ? result.dict : {}
-    }
+  // Language is fixed to Japanese - the argument is ignored so stale
+  // call sites (setLanguage IPC, Settings leftovers) stay harmless.
+  async setLanguage(_code?: string): Promise<void> {
+    this.code = FIXED_LANGUAGE
+    window.electronAPI?.setLanguage?.(FIXED_LANGUAGE)
+    const result = await window.electronAPI?.loadLanguage?.(FIXED_LANGUAGE)
+    this.dict = result?.success && result.dict ? result.dict : {}
     window.dispatchEvent(new Event(EVENT))
   }
 
   async init(): Promise<void> {
-    const saved = configService.getLanguage()
-    if (saved && saved !== 'en') {
-      await this.setLanguage(saved)
-    }
+    await this.setLanguage(FIXED_LANGUAGE)
   }
 
   subscribe(cb: () => void): () => void {

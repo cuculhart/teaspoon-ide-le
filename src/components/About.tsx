@@ -18,15 +18,15 @@ const About: React.FC<AboutProps> = ({ onClose }) => {
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-modal about-modal" onClick={(e) => e.stopPropagation()}>
         <div className="settings-header">
-          <h2>{t('About Teaspoon IDE')}</h2>
+          <h2>{t('About Teaspoon IDE Local Edition')}</h2>
           <button className="close-button" onClick={onClose}>×</button>
         </div>
         <div className="settings-content about-content">
-          <img src={iconUrl} className="about-icon" alt="Teaspoon IDE" />
-          <h3 className="about-app-name">Teaspoon IDE</h3>
-          <p className="about-version">{t('Version')} 1.7.2</p>
+          <img src={iconUrl} className="about-icon" alt="Teaspoon IDE Local Edition" />
+          <h3 className="about-app-name">Teaspoon IDE Local Edition</h3>
+          <p className="about-version">{t('Version')} 1.0.0</p>
           <p className="about-tagline">
-            {t('Standalone, Privacy-First AI IDE')}
+            {t('Offline-first, local-only AI IDE (Japanese)')}
           </p>
           <p className="about-license">
             {t('License')}: FSL-1.1-MIT
@@ -35,7 +35,7 @@ const About: React.FC<AboutProps> = ({ onClose }) => {
             <tbody>
               <tr>
                 <td className="about-label">{t('Author')}</td>
-                <td>Cuculhart</td>
+                <td>Teaspoon LE contributors</td>
               </tr>
               <tr>
                 <td className="about-label">{t('Web Site')}</td>

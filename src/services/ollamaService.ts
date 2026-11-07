@@ -70,14 +70,25 @@ export class OllamaEmptyResponseError extends Error {
 
 // Local LLM via Ollama's native /api/chat endpoint. The OpenAI-compatible
 // /v1 endpoint cannot carry options like num_thread, so the native API is
-// used. Same text-based file-command protocol as the Gemini path.
+// used. Same text-based file-command protocol as the chat path.
 class OllamaService {
+  // Local Edition pins the endpoint: the app only ever talks to an
+  // Ollama server on this machine. There is no remote-URL setting.
   private getBaseUrl(): string {
-    return (configService.getOllamaBaseUrl() || 'http://localhost:11434').replace(/\/+$/, '')
+    return 'http://localhost:11434'
   }
 
   private getModel(): string {
     return configService.getOllamaModel() || 'gemma4:e4b'
+  }
+
+  // Model id the next run should use, and the label the chat header shows.
+  resolveModel(): string {
+    return this.getModel()
+  }
+
+  modelLabel(): string {
+    return `ollama:${this.getModel()}`
   }
 
   isConfigured(): boolean {

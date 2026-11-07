@@ -13,7 +13,7 @@ interface ContextWindow {
 }
 
 class ContextService {
-  private maxTokens = 100000 // 100k tokens for Gemini 3.8 Flash
+  private maxTokens = 100000 // 100k token context budget
   private contextWindow: ContextWindow = {
     chunks: [],
     totalTokens: 0,

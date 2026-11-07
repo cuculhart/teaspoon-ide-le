@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,16 +7,17 @@
       Content Security Policy.
       NOTE: 'unsafe-inline' (script/style) and ws://localhost:* are needed for
       the Vite dev server (react-refresh preamble, HMR websocket).
-      cdn.jsdelivr.net is required because @monaco-editor/react loads Monaco
-      from the CDN. connect-src allows any https: endpoint because the LiteLLM
-      proxy URL is user-configured. When Monaco is bundled locally and the app
-      is packaged, tighten script-src to 'self' and remove 'unsafe-inline'.
+      Local Edition: connect-src is restricted to localhost - the only
+      network destination the app ever uses is the local Ollama server
+      (http://localhost:11434). cdn.jsdelivr.net entries are retained from
+      upstream for Monaco compatibility but nothing fetches them at
+      runtime in the packaged build.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; img-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:* https:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' data: https://cdn.jsdelivr.net; img-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*; worker-src 'self' blob:; object-src 'none'; base-uri 'self'"
     />
-    <title>Teaspoon IDE</title>
+    <title>Teaspoon IDE Local Edition</title>
   </head>
   <body>
     <div id="root"></div>

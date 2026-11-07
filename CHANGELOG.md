@@ -1,11 +1,44 @@
 # Changelog
 
-All notable changes to Teaspoon IDE are documented in this file.
+All notable changes to Teaspoon IDE Local Edition are documented in this
+file. This is a standalone fork of Teaspoon IDE; upstream history is not
+carried over.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-11-06
+
+### Changed
+
+- Forked from Teaspoon IDE v1.7.2 as **Teaspoon IDE Local Edition**
+  (Teaspoon LE), versioned independently starting at 1.0.0. No upstream
+  tracking.
+
+### Removed
+
+- Gemini API provider, LiteLLM proxy support, and all BYOK/API-key
+  flows (Settings UI, key storage, OS-keychain secret store, and the
+  main-process LLM relay IPC).
+- Organization (managed) mode, its sign-in gate, and the managed-usage
+  budget UI.
+- Remote/custom Ollama endpoint configuration - the endpoint is fixed
+  to `http://localhost:11434`.
+- UI language picker and non-English dictionaries; the product is
+  Japanese-only and the agent prompt instructs Japanese replies.
+- Themes reduced to System / Dark / Light / Organic Light / Heritage /
+  Silver Screen; default theme is Light.
+
+### Added
+
+- Single local backend: Ollama on localhost (`/api/chat`, `/api/tags`)
+  with model picker fed by installed local models (default
+  `gemma4:e4b`). CPU Threads, Context Size, Temperature, and Thinking
+  controls are kept.
+- Japanese UI dictionaries and prompts (lang/ja.json), Japanese-only
+  menus/dialogs, and a system prompt requiring Japanese replies.
 
 ## [1.7.2] - 2026-10-30
 

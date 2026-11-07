@@ -4,7 +4,6 @@ import Editor from './components/Editor'
 import Chat from './components/Chat'
 import Settings from './components/Settings'
 import About from './components/About'
-import ManagedGate from './components/ManagedGate'
 import GitPanel from './components/GitPanel'
 import TerminalPanel from './components/TerminalPanel'
 import QuickOpen from './components/QuickOpen'
@@ -59,10 +58,7 @@ function App() {
   const [sidebarTab, setSidebarTab] = useState<'explorer' | 'git' | 'search'>('explorer')
   const [showQuickOpen, setShowQuickOpen] = useState(false)
   const [gotoLine, setGotoLine] = useState<{ line: number; n: number } | null>(null)
-  const [managedLocked, setManagedLocked] = useState(configService.isManagedLocked())
   const fileHistoryRef = useRef<string[]>([]) // absolute paths, most recent first
-  const managedLockedRef = useRef(managedLocked)
-  managedLockedRef.current = managedLocked
   const [chatFocus, setChatFocus] = useState(configService.getChatFocus())
   const chatFocusRef = useRef(chatFocus)
   chatFocusRef.current = chatFocus
@@ -72,21 +68,6 @@ function App() {
     setChatFocus(on)
     configService.setChatFocus(on)
   }
-
-  // Managed mode: re-evaluate the lock when the session changes or expires
-  useEffect(() => {
-    const refresh = () => setManagedLocked(configService.isManagedLocked())
-    window.addEventListener('teaspoon:managed-changed', refresh)
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const expiry = configService.getManagedSessionExpiry()
-    if (configService.getManagedMode() && expiry) {
-      timer = setTimeout(refresh, Math.max(0, expiry - Date.now()))
-    }
-    return () => {
-      window.removeEventListener('teaspoon:managed-changed', refresh)
-      if (timer) clearTimeout(timer)
-    }
-  }, [managedLocked])
 
   // Load the saved UI language once at startup
   useEffect(() => {
@@ -226,9 +207,6 @@ function App() {
     if (!api?.onMenuAction) return
 
     const unsubscribe = api.onMenuAction((action: string) => {
-      // While the sign-in gate is up, menu accelerators must not reach
-      // the workspace (save/export/open would run against hidden UI).
-      if (managedLockedRef.current) return
       if (action === 'toggle-chat-focus') {
         setChatFocusMode(!chatFocusRef.current)
         return
@@ -312,10 +290,6 @@ function App() {
     setFileContent(newContent)
   }
 
-  const handleApiKeySaved = () => {
-    setSettingsKey(prev => prev + 1) // Force re-render of Chat component
-  }
-
   const handleProjectChange = (project: any) => {
     if (!project) {
       // Project closed: release the open file from the editor, but keep
@@ -345,12 +319,6 @@ function App() {
   }
 
   const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v))
-
-  // Managed mode without a valid session: replace the whole workspace
-  // with the sign-in gate until credentials are issued by the server.
-  if (managedLocked) {
-    return <ManagedGate />
-  }
 
   return (
     <div className={`app${chatFocus ? ' chat-focus' : ''}`}>
@@ -427,7 +395,7 @@ function App() {
           onToggleFocus={() => setChatFocusMode(!chatFocus)}
         />
       </div>
-      {showSettings && <Settings onClose={() => setShowSettings(false)} onApiKeySaved={handleApiKeySaved} />}
+      {showSettings && <Settings onClose={() => setShowSettings(false)} />}
       {showAbout && <About onClose={() => setShowAbout(false)} />}
       {toast && <div className="toast">{toast}</div>}
       {showQuickOpen && projectService.getCurrentProject() && (

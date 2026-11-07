@@ -1,16 +1,20 @@
-# Teaspoon IDE
+# Teaspoon IDE Local Edition（Teaspoon LE）
 
 [English](readme.md) | 日本語
 
 <p align="center">
-  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE — Standalone, Privacy-First AI IDE">
+  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE Local Edition — オフライン優先・ローカル完結の AI IDE">
 </p>
 
-ファイルエクスプローラー、コードエディター、AIチャット、Git操作、ターミナルが一体となった、スタンドアロン型のElectron製AIコーディングアシスタントです。
+**Teaspoon IDE Local Edition** は [Teaspoon IDE](https://github.com/cuculhart/teaspoon-ide) のフォークです。ファイルエクスプローラー、コードエディター、AIチャット、Git操作、ターミナルが一体となった、スタンドアロン型のElectron製AIコーディングアシスタントを、**オフライン・ローカル完結**向けに再構成したものです。
 
-**Teaspoon IDE** の名前は「小さじ1杯（a teaspoon）のトークンで実用的な仕事をこなす」という設計目標に由来します。デフォルトで送信するコンテキストはファイルツリー（パス一覧）のみで、AI は READ_FILE/GREP を通じて必要な内容だけを取得し、メッセージあたりのトークンを抑えます。
+- **APIキーなし・クラウドなし・BYOKなし。** AIバックエンドはローカルの [Ollama](https://ollama.com) サーバー（`localhost:11434`）のみ。LANケーブルを抜いても、Wi-Fiを切っても動作します。
+- **日本語のみ。** UI・メニュー・ダイアログ・AIの応答はすべて日本語です。
+- **情シス部門に説明しやすい。** アカウント・テレメトリ・外部エンドポイントがなく、監査対象は Ollama（MIT）と本アプリだけです。
 
-パッケージ名・リポジトリ名は `teaspoon-ide`。呼称・表示名は **Teaspoon IDE** です。（旧称: **Forger**）
+**Teaspoon** の名前は「小さじ1杯（a teaspoon）のトークンで実用的な仕事をこなす」という設計目標に由来します。デフォルトで送信するコンテキストはファイルツリー（パス一覧）のみで、AI は READ_FILE/GREP を通じて必要な内容だけを取得し、メッセージあたりのトークンを抑えます。
+
+上流リリースの追従は行わない、独立したフォークです。
 
 Author: Cuculhart — Web Site: https://cuculhart.com
 
@@ -71,10 +75,10 @@ Author: Cuculhart — Web Site: https://cuculhart.com
 
 ### 外観・設定
 
-- **テーマ**: System（OS設定連動、nativeTheme経由）/ Dark / Light に加え、12のカラーテーマ: Organic Light、Muted Ocean、Ancient Console、Walnut、Heritage、Rich Wine、Violet Fizz、Otegami、Soda Float、Modern Syntax eXtensible (MSX)、Chaya、Coquette
+- **テーマ**: System（OS設定連動、nativeTheme経由）/ Dark / Light に加え、オフィス向けのカラーテーマ: Organic Light、Heritage、Silver Screen
 - **フォント**: ファミリー・サイズをUI全体とMonacoエディターに反映
-- **LLMプロバイダー**: Gemini API（クラウド）/ Ollama（ローカル・オフライン）を設定画面で切替。モデル選択・LiteLLMプロキシにも対応。Ollama向けには CPU Threads（推論に使うスレッド数の上限。生成中もPCを応答可能に保つ）と Thinking（対応モデルの推論トレースをON/OFF）を設定可能。いずれもOllamaネイティブの `/api/chat` オプション経由
-- **UI言語**: Settings > Appearance > Language で切替。`lang/<code>.json` を追加すれば誰でも言語を追加可能
+- **Ollama（ローカルAI）**: 唯一のバックエンド。`localhost:11434` 固定で接続先の設定項目はありません。モデルはローカルにインストール済みのものから選択（既定: `gemma4:e4b`）。CPU Threads（推論スレッド数の上限）、Context Size（num_ctx）、Temperature、Thinking を設定可能。いずれもOllamaネイティブの `/api/chat` オプション経由
+- **UI言語**: 日本語固定
 - **チャットフォーカス**: チャットヘッダーのフォーカス切替ボタン（入るとき⛶、戻るとき◫）または View > Toggle Chat Focus（Ctrl+Shift+B）でサイドバー・エディター・ターミナルを隠し、チャットを全画面表示。IDE系のメニュー操作時は自動で復帰し、状態は再起動後も保持
 - **チャットリスト**: チャットフォーカス中は会話一覧レールが表示され（一覧｜会話の2ペイン）、チャットを切り替えられる。履歴はプロジェクト未オープンの会話を含め会話単位で userData/chat-history 配下のJSONに永続化。長い会話は古い部分をローリング要約に畳み込み、モデルのコンテキスト上限内に収める
 - **About**: Help > About Teaspoon IDE
@@ -98,38 +102,18 @@ Electron アプリ
 │   ├── ターミナルペイン (xterm.js)
 │   └── コンテキスト管理 / i18nサービス
 └── LLM統合
-    ├── Gemini API
-    ├── Ollama（ローカル・オフライン）
-    ├── LiteLLMプロキシ（オプション）
-    └── ファイル操作コマンド（エージェントループ）
+    └── Ollama on localhost:11434（ローカル・オフライン）
+        └── ファイル操作コマンド（エージェントループ）
 ```
 
-## セキュリティアーキテクチャ
+## セキュリティ・ネットワークモデル
 
-APIキーを安全に管理するために、LiteLLMプロキシを使用することを推奨します：
+Local Edition には**クラウド経路が一切ありません**：
 
-```
-Teaspoon IDE → ダミーAPIキー → LiteLLM (VPS等) → 本物のAPIキー → Google AI Studio
-```
-
-### LiteLLMプロキシの設定
-
-1. **LiteLLMサーバーのセットアップ**（VPSなど）:
-```bash
-pip install litellm
-litellm --model gemini/gemini-3.8-flash --api_key YOUR_REAL_API_KEY
-```
-
-2. **Teaspoon IDEの設定**:
-   - 設定画面で「Use Proxy」を有効化
-   - プロキシURLを入力（例: `http://your-vps:4000`）
-   - ダミーAPIキーを入力（実際には使用されません）
-
-3. **利点**:
-   - 本物のAPIキーがクライアントに保存されない
-   - APIキーのローテーションが容易
-   - 使用量の監視と制限が可能
-   - 複数のAIプロバイダーの統合が可能
+- レンダラーが通信するのは `http://localhost:11434`（Ollama の `/api/chat` と `/api/tags`）のみ。接続先・プロキシの設定項目も、資格情報の保存機構もありません。
+- Electron メインプロセスの LLM リレー、シークレットストア、組織（マネージド）モードは上流版から完全に削除しています。
+- Ollama のローカルAPIには認証がないため、`127.0.0.1` バインド（既定）を維持し、ポート11434をLANに公開しないでください。
+- 外部への通信を完全に断ちたい環境では、Ollama サービスに `OLLAMA_NO_CLOUD=1` を設定するか、Ollama のアウトバウンドをブロックするファイアウォール規則を追加してください。モデルファイルは接続可能なマシンで `ollama pull` してからコピーする必要があります。
 
 ## 配布・運用モデル
 
@@ -164,10 +148,9 @@ litellm --model gemini/gemini-3.8-flash --api_key YOUR_REAL_API_KEY
 - **エディター**: Monaco Editor
 - **Git**: simple-git
 - **ターミナル**: node-pty + xterm.js
-- **LLM**: Gemini API / Ollama（ローカル）
+- **LLM**: Ollama on localhost（ローカルのみ）
 - **ビルドツール**: Vite + Electron Forge
 - **設定管理**: ConfigService + localStorage
-- **プロキシ**: LiteLLM（オプション）
 - **Node.js**: v22 LTS推奨
 
 ## はじめに
@@ -214,11 +197,9 @@ npm run dev
 
 ### AIチャットを使用する
 
-1. 設定画面（⚙️）を開く
-2. LLM Providerを選択:
-   - **Gemini API**: APIキーを入力しモデルを選択（デフォルト: gemini-3.8-flash）。必要に応じてLiteLLMプロキシを設定。キーはOSキーチェーンで暗号化され、API呼び出しはElectronのメインプロセスで実行されるためレンダラーからキーには触れない
-   - **Ollama**: ローカルでOllamaを起動し、エンドポイントとモデルを選択（インストール済みモデルは自動検出）。必要に応じて CPU Threads で推論スレッド数に上限を設けたり、Thinking（On/Off/Model default）で推論トレースの有無を切替可能
-3. チャットでメッセージを送信
+1. 同じマシンに [Ollama](https://ollama.com) をインストールして起動し、モデルを取得（例: `ollama pull gemma4:e4b`）
+2. 設定画面（⚙️）> Ollama で接続とモデルを確認
+3. チャットでメッセージを送信 — 応答は既定で日本語です
 
 ### コンテキスト管理
 

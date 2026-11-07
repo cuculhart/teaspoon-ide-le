@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect } from 'react'
 import { llmService } from '../services/llmService'
 import { getProvider } from '../services/providers'
 import { configService } from '../services/configService'
-import { managedService } from '../services/managedService'
 import { projectService } from '../services/projectService'
 import { Project } from '../types/project'
 import { contextService } from '../services/contextService'
@@ -971,8 +970,6 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   const [isLoading, setIsLoading] = useState(false)
   const [isConfigured, setIsConfigured] = useState(false)
   const [currentModel, setCurrentModel] = useState<string>('')
-  // Organization session: remaining budget from the management server
-  const [managedUsage, setManagedUsage] = useState<{ spend: number; maxBudget: number | null; resetAt?: string } | null>(null)
   // Model pinned to the in-flight request (shown while generating)
   const [activeModel, setActiveModel] = useState<string>('')
   const [abortController, setAbortController] = useState<AbortController | null>(null)
@@ -1401,33 +1398,6 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     return () => window.removeEventListener('teaspoon:llm-changed', refreshLlm)
   }, [])
 
-  // Organization session: poll the remaining budget once a minute and
-  // re-check on session changes
-  useEffect(() => {
-    let cancelled = false
-    const refreshUsage = async () => {
-      const usage = await managedService.getUsage()
-      if (!cancelled) setManagedUsage(usage)
-    }
-    refreshUsage()
-    const interval = setInterval(refreshUsage, 60000)
-    window.addEventListener('teaspoon:managed-changed', refreshUsage)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-      window.removeEventListener('teaspoon:managed-changed', refreshUsage)
-    }
-  }, [])
-
-  // Each completed reply may have consumed budget - refresh then too
-  const wasLoadingRef = useRef(false)
-  useEffect(() => {
-    if (wasLoadingRef.current && !isLoading) {
-      managedService.getUsage().then(setManagedUsage)
-    }
-    wasLoadingRef.current = isLoading
-  }, [isLoading])
-
   const handleSend = async () => {
     if (!input.trim()) return
 
@@ -1787,12 +1757,6 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     }
   }
 
-  // Show remaining budget as a percentage only - never expose the
-  // dollar amount, which would reveal the organization's actual cap.
-  const budgetPct = managedUsage?.maxBudget != null && managedUsage.maxBudget > 0
-    ? Math.max(0, (managedUsage.maxBudget - managedUsage.spend) / managedUsage.maxBudget * 100)
-    : null
-
   // Fold consecutive assistant messages that carry agent actions into a
   // single collapsible "Agent run" card - the trace of one user request.
   // Step prose (the model's narration between commands) stays inside its
@@ -1818,14 +1782,6 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           {currentModel && (
             <span className="model-badge" title={`${t('Current model')}: ${currentModel}`}>
               {currentModel}
-            </span>
-          )}
-          {budgetPct != null && (
-            <span
-              className={`budget-badge ${budgetPct <= 0 ? 'exhausted' : budgetPct < 20 ? 'low' : ''}`}
-              title={`${t('Allotted budget remaining')}: ${budgetPct.toFixed(1)}%${managedUsage?.resetAt ? ` · ${t('Resets')}: ${managedUsage.resetAt}` : ''}`}
-            >
-              {t('Budget')} {budgetPct.toFixed(1)}%
             </span>
           )}
         </div>
@@ -1934,7 +1890,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             <p>
               {isConfigured 
                 ? t('Ask me anything about your code')
-                : t('Please configure your Gemini API key in settings to start chatting')}
+                : t('Ollama is not reachable. Start the Ollama app or run ollama serve, and check Settings.')}
             </p>
           </div>
         )}
@@ -2050,7 +2006,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyPress={handleKeyPress}
-          placeholder={isConfigured ? t('Type your message...') : t('Configure API key in settings to start chatting')}
+          placeholder={isConfigured ? t('Type your message...') : t('Ollama is not reachable - check Settings')}
           rows={3}
           disabled={isLoading || !isConfigured}
         />
@@ -2059,7 +2015,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           disabled={isLoading || !input.trim() || !isConfigured}
           className="send-button"
         >
-          {isConfigured ? t('Send') : t('Configure API Key')}
+          {isConfigured ? t('Send') : t('Ollama')}
         </button>
       </div>
         </div>
