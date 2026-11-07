@@ -59,13 +59,6 @@ monaco.editor.defineTheme('teaspoon-quiet', {
   },
 })
 
-// Muted Ocean editor theme - deep-sea palette in index.css ([data-theme='ocean'])
-
-// Ancient Console editor theme - green-phosphor palette ([data-theme='console'])
-
-// Walnut editor theme - dark wood with silvery nail-bright text
-// ([data-theme='walnut'])
-
 // Heritage editor theme - pale woodgrain, reddish-black groove text
 // ([data-theme='heritage'])
 monaco.editor.defineTheme('teaspoon-heritage', {
@@ -97,56 +90,34 @@ monaco.editor.defineTheme('teaspoon-heritage', {
   },
 })
 
-// Rich Wine editor theme - wine-dark bg, silvery text, copper keywords
-// and golds; mauve functions keep red out of the code ([data-theme='wine'])
-
-// Violet Fizz editor theme - violet-cocktail bg, neon-blue keywords,
-// moon-yellow strings ([data-theme='fizz'])
-
-// Otegami editor theme - washi paper, soot-ink text, vermilion accents
-// ([data-theme='otegami'])
-
-// Soda Float editor theme - mid sky-blue soda with ink text and pale
-// foam colors ([data-theme='float'])
-
-// Modern Syntax eXtensible (MSX) editor theme - saturated MSX-blue with
-// white text and modernized 16-color brights ([data-theme='msx'])
-
-// Chaya editor theme - tea-field green, new-leaf keywords, jade
-// functions, plum-blossom numbers ([data-theme='chaya'])
-
-// Coquette editor theme - pale blush, plum-chocolate text, satin-rose
-// keywords ([data-theme='coquette'])
-
-// Silver Screen editor theme - mid-gray #555 screen, achromatic tokens:
-// ink keywords (bold) and chalk-white functions separate by luminance
-// and weight instead of hue ([data-theme='silver'])
-monaco.editor.defineTheme('teaspoon-silver', {
+// Ancient Console editor theme - green-phosphor palette
+// ([data-theme='console'])
+monaco.editor.defineTheme('teaspoon-console', {
   base: 'vs-dark',
   inherit: true,
   rules: [
-    { token: 'keyword', foreground: '161616', fontStyle: 'bold' },
-    { token: 'string', foreground: 'd0d0d0' },
-    { token: 'number', foreground: '2a2a2a' },
-    { token: 'comment', foreground: '8a8a8a', fontStyle: 'italic' },
-    { token: 'type', foreground: 'b0b0b0' },
-    { token: 'identifier.function', foreground: 'ffffff' },
+    { token: 'keyword', foreground: 'b0cf9e' },
+    { token: 'string', foreground: 'c9b98a' },
+    { token: 'number', foreground: 'd0a878' },
+    { token: 'comment', foreground: '57745a', fontStyle: 'italic' },
+    { token: 'type', foreground: '8fbf9f' },
+    { token: 'identifier.function', foreground: 'a3c9a8' },
   ],
   colors: {
-    'editor.background': '#555555',
-    'editor.foreground': '#e6e6e6',
-    'editorLineNumber.foreground': '#9a9a9a',
-    'editorLineNumber.activeForeground': '#c8c8c8',
-    'editor.lineHighlightBackground': '#4c4c4c',
-    'editor.selectionBackground': '#636363',
-    'editor.inactiveSelectionBackground': '#4a4a4a',
-    'editorCursor.foreground': '#e6e6e6',
-    'editorWhitespace.foreground': '#6e6e6e',
-    'editorWidget.background': '#4a4a4a',
-    'editorWidget.border': '#6e6e6e',
-    'minimap.background': '#4a4a4a',
-    'diffEditor.insertedTextBackground': '#8a9a7a33',
-    'diffEditor.removedTextBackground': '#b87a6a33',
+    'editor.background': '#0c2214',
+    'editor.foreground': '#93b494',
+    'editorLineNumber.foreground': '#47614a',
+    'editorLineNumber.activeForeground': '#57745a',
+    'editor.lineHighlightBackground': '#16301d',
+    'editor.selectionBackground': '#1f4228',
+    'editor.inactiveSelectionBackground': '#14301c',
+    'editorCursor.foreground': '#93b494',
+    'editorWhitespace.foreground': '#1e3823',
+    'editorWidget.background': '#0d1a10',
+    'editorWidget.border': '#1e3823',
+    'minimap.background': '#0d1a10',
+    'diffEditor.insertedTextBackground': '#7fae7233',
+    'diffEditor.removedTextBackground': '#d08a6a33',
   },
 })
 
@@ -157,5 +128,5 @@ export const MONACO_THEME: Record<string, string> = {
   light: 'vs',
   quiet: 'teaspoon-quiet',
   heritage: 'teaspoon-heritage',
-  silver: 'teaspoon-silver',
+  console: 'teaspoon-console',
 }

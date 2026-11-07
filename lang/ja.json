@@ -215,7 +215,6 @@
   "Modern Syntax eXtensible": "8bitの青春",
   "Chaya": "茶屋",
   "Coquette": "コケット",
-  "Silver Screen": "銀幕",
   "Font Family": "フォント",
   "Default (system font)": "デフォルト（システムフォント）",
   "Font Size": "フォントサイズ",
@@ -460,5 +459,7 @@
   "Agent mode": "コード",
   "Ask mode: read-only - the AI can inspect files but cannot change them. Click for agent mode.": "相談：読み取り専用 - AIはファイルを閲覧できますが変更できません。クリックでコードモードへ。",
   "Agent mode: the AI can edit files and run commands (with approval). Click for ask mode.": "コード：AIはファイル編集やコマンド実行ができます（要承認）。クリックで相談モードへ。",
-  "Blocked (ask mode)": "相談でブロック"
+  "Blocked (ask mode)": "相談でブロック",
+  "Ask mode: read-only - the AI can inspect files but cannot change them.": "相談：読み取り専用 - AIはファイルを閲覧できますが変更できません。",
+  "Agent mode: the AI can edit files and run commands (with approval).": "コード：AIはファイル編集やコマンド実行ができます（要承認）。"
 }

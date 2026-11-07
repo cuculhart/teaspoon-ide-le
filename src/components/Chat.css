@@ -97,6 +97,49 @@
   color: var(--accent);
 }
 
+/* Mode switch (コード/相談): a segmented pill so the current mode is
+   visible at a glance. Agent mode lights up with the accent color;
+   ask mode stays a calm surface tone. */
+.chat-mode-switch {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.chat-mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.85em;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 3px 12px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chat-mode-btn + .chat-mode-btn {
+  border-left: 1px solid var(--border-color);
+}
+
+.chat-mode-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.chat-mode-btn.mode-agent.active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.chat-mode-btn.mode-ask.active {
+  background: var(--bg-active);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
 .rollback-button {
   background: none;
   border: 1px solid var(--border-strong);
@@ -453,63 +496,6 @@
   background: var(--error);
   color: var(--on-accent);
   font-size: 0.85em;
-}
-
-/* ---------- Silver Screen only (scoped to data-theme='silver') ----------
-   Silent-film intertitle cards: double-line frame, serif centered text,
-   no rounded corners, and a speech-tail notch on each card's edge.
-   The chat pane itself becomes the luminous projection surface. */
-[data-theme='silver'] .chat {
-  background: radial-gradient(ellipse 82% 76% at 50% 42%,
-    #616161 0%, #585858 46%, #4b4b4b 100%);
-}
-
-[data-theme='silver'] .chat-message .message-content {
-  position: relative;
-  border-radius: 2px;
-  font-family: Georgia, 'Times New Roman', 'Yu Mincho', 'Hiragino Mincho ProN', serif;
-  text-align: center;
-  letter-spacing: 0.03em;
-}
-
-[data-theme='silver'] .chat-message.user .message-content {
-  border: 1px solid #262626;
-  box-shadow: inset 0 0 0 3px var(--bubble-user), inset 0 0 0 4px #8a8a8a;
-}
-
-[data-theme='silver'] .chat-message.assistant .message-content {
-  border: 1px solid var(--bubble-ai-border);
-  box-shadow: inset 0 0 0 3px var(--bubble-ai), inset 0 0 0 4px #5a5a5a;
-}
-
-[data-theme='silver'] .chat-message.assistant .message-content::before {
-  content: '';
-  position: absolute;
-  top: 14px;
-  left: -10px;
-  width: 10px;
-  height: 14px;
-  clip-path: polygon(0 50%, 100% 0, 100% 100%);
-  background: var(--bubble-ai);
-}
-
-[data-theme='silver'] .chat-message.user .message-content::before {
-  content: '';
-  position: absolute;
-  top: 14px;
-  right: -10px;
-  width: 10px;
-  height: 14px;
-  clip-path: polygon(0 0, 0 100%, 100% 50%);
-  background: var(--bubble-user);
-}
-
-/* code, lists and tables stay left-aligned inside the centered card */
-[data-theme='silver'] .chat-message .message-content pre,
-[data-theme='silver'] .chat-message .message-content table,
-[data-theme='silver'] .chat-message .message-content ul,
-[data-theme='silver'] .chat-message .message-content ol {
-  text-align: left;
 }
 
 /* ---------- Agent run step card (T12) ----------

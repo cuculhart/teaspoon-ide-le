@@ -9,7 +9,7 @@ const RECENT_PROJECTS_KEY = 'recent_projects'
 const MAX_RECENT_PROJECTS = 10
 
 export type ThemeMode =
-  'system' | 'dark' | 'light' | 'quiet' | 'heritage' | 'silver'
+  'system' | 'dark' | 'light' | 'quiet' | 'heritage' | 'console'
 
 // 'tree' = send only the file list (AI fetches contents via tools).
 // 'full' = send scored file contents up to the token budget (legacy).
@@ -100,8 +100,10 @@ class ConfigService {
 
   getTheme(): ThemeMode {
     const value = this.get('THEME')
-    const modes: ThemeMode[] = ['system', 'dark', 'light', 'quiet', 'heritage', 'silver']
-    return modes.includes(value as ThemeMode) ? (value as ThemeMode) : 'light'
+    const modes: ThemeMode[] = ['system', 'dark', 'light', 'quiet', 'heritage', 'console']
+    // 'silver' was replaced by 'console' - migrate stored selections.
+    const normalized = value === 'silver' ? 'console' : value
+    return modes.includes(normalized as ThemeMode) ? (normalized as ThemeMode) : 'light'
   }
 
   setTheme(theme: ThemeMode): void {

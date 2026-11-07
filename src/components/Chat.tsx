@@ -1866,19 +1866,35 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
               {chatFocus ? '◫' : '⛶'}
             </button>
           )}
-          <button
-            className={`settings-button chat-mode-button ${chatMode === 'ask' ? 'active' : ''}`}
-            onClick={() => {
-              const next = chatMode === 'ask' ? 'agent' : 'ask'
-              configService.setChatMode(next)
-              setChatMode(next)
-            }}
+          <div
+            className="chat-mode-switch"
             title={chatMode === 'ask'
-              ? t('Ask mode: read-only - the AI can inspect files but cannot change them. Click for agent mode.')
-              : t('Agent mode: the AI can edit files and run commands (with approval). Click for ask mode.')}
+              ? t('Ask mode: read-only - the AI can inspect files but cannot change them.')
+              : t('Agent mode: the AI can edit files and run commands (with approval).')}
           >
-            {chatMode === 'ask' ? t('Ask mode') : t('Agent mode')}
-          </button>
+            <button
+              className={`chat-mode-btn mode-agent${chatMode === 'agent' ? ' active' : ''}`}
+              onClick={() => {
+                if (chatMode !== 'agent') {
+                  configService.setChatMode('agent')
+                  setChatMode('agent')
+                }
+              }}
+            >
+              {t('Agent mode')}
+            </button>
+            <button
+              className={`chat-mode-btn mode-ask${chatMode === 'ask' ? ' active' : ''}`}
+              onClick={() => {
+                if (chatMode !== 'ask') {
+                  configService.setChatMode('ask')
+                  setChatMode('ask')
+                }
+              }}
+            >
+              {t('Ask mode')}
+            </button>
+          </div>
           <button className="settings-button" onClick={onOpenSettings} title={t('Settings')}>
             ⚙️
           </button>

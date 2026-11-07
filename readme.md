@@ -74,7 +74,7 @@ Author: Cuculhart — Web Site: https://cuculhart.com
 
 ### 外観・設定
 
-- **テーマ**: System（OS設定連動、nativeTheme経由）/ Dark / Light に加え、オフィス向けのカラーテーマ: Organic Light、Heritage、Silver Screen
+- **テーマ**: System（OS設定連動、nativeTheme経由）/ Dark / Light に加え、オフィス向けのカラーテーマ: Organic Light、Heritage、Ancient Console
 - **フォント**: ファミリー・サイズをUI全体とMonacoエディターに反映
 - **Ollama（ローカルAI）**: 唯一のバックエンド。`localhost:11434` 固定で接続先の設定項目はありません。モデルはローカルにインストール済みのものから選択（推奨: `gemma4:e4b`）。CPU Threads（推論スレッド数の上限）、Context Size（num_ctx）、Temperature、Thinking を設定可能。いずれもOllamaネイティブの `/api/chat` オプション経由
 - **UI言語**: 日本語固定

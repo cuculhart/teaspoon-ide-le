@@ -275,7 +275,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 <option value="light">{t('Light')}</option>
                 <option value="quiet">{t('Organic Light')}</option>
                 <option value="heritage">{t('Heritage')}</option>
-                <option value="silver">{t('Silver Screen')}</option>
+                <option value="console">{t('Ancient Console')}</option>
               </select>
             </div>
 
