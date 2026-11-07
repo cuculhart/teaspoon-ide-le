@@ -461,5 +461,6 @@
   "Agent mode: the AI can edit files and run commands (with approval). Click for ask mode.": "コード：AIはファイル編集やコマンド実行ができます（要承認）。クリックで相談モードへ。",
   "Blocked (ask mode)": "相談でブロック",
   "Ask mode: read-only - the AI can inspect files but cannot change them.": "相談：読み取り専用 - AIはファイルを閲覧できますが変更できません。",
-  "Agent mode: the AI can edit files and run commands (with approval).": "コード：AIはファイル編集やコマンド実行ができます（要承認）。"
+  "Agent mode: the AI can edit files and run commands (with approval).": "コード：AIはファイル編集やコマンド実行ができます（要承認）。",
+  "Retry in code mode": "コードモードで再試行"
 }

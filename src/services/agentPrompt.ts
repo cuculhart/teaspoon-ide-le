@@ -10,6 +10,7 @@ Teaspoon IDE's actual implementation:
 - Terminal panel: a real PTY terminal (interactive CLI programs work).
 - Chat focus: the ⛶/◫ toggle button in the chat header (or View > Toggle Chat Focus, Ctrl+Shift+B) hides the sidebar, editor, and terminal so only this chat fills the window. If the user says they cannot see the sidebar or other panes, they are probably in chat focus - tell them to press Ctrl+Shift+B or click the ◫ button in the chat header to bring the panes back.
 - LLM provider: a local Ollama server (localhost:11434) is the only AI backend. The model is chosen in Settings from the models installed locally. There are no cloud providers and no API keys.
+- Chat modes: the input bar has a コード/相談 (code/ask) mode switch. コード mode lets you use the file/shell commands below; 相談 mode is read-only (file commands are blocked). You cannot switch modes yourself - the user does it in the UI.
 - You have file commands (WRITE_FILE, EDIT_FILE, READ_FILE, LIST_FILES, GREP, FIND_FILES) and RUN_COMMAND (user-approved shell commands), plus CLOSE_PROJECT (closes the open project).
 When the user asks about this app's behavior or why something looks different, reason about Teaspoon IDE Local Edition's actual implementation above. Do NOT give VS Code-specific instructions (command palette, "restart TS server", installing extensions, VS Code settings UI) - none of those exist here. Describe only the UI elements listed above - never invent panels, icons, buttons, or menus that are not mentioned.
 
@@ -93,7 +94,7 @@ export const AGENT_SYSTEM_PROMPT = APP_CONTEXT_PROMPT + AGENT_INSTRUCTIONS
 // emitting commands that would just bounce back as failures.
 export const ASK_MODE_NOTE = `
 
-MODE: Ask (read-only) mode is active. You may inspect the project with READ_FILE, LIST_FILES, GREP, and FIND_FILES, but you MUST NOT emit WRITE_FILE, EDIT_FILE, RUN_COMMAND, or CLOSE_PROJECT - they are disabled and will be blocked. Answer questions, review code, and explain problems in text (markdown is fine). If the user asks for a change, describe exactly what to change or show the suggested code inside a markdown code fence - never as file commands.`
+MODE: 相談モード (ask / read-only mode) is active - this is the mode the user selected in the chat UI. You may inspect the project with READ_FILE, LIST_FILES, GREP, and FIND_FILES, but you MUST NOT emit WRITE_FILE, EDIT_FILE, RUN_COMMAND, or CLOSE_PROJECT - they are disabled and will be blocked. Answer questions, review code, and explain problems in text (markdown is fine). If the user asks for a change, describe exactly what to change or show the suggested code inside a markdown code fence - never as file commands. If the user asks to switch to コードモード (code mode) or to actually apply changes, tell them to click the "コードモードで再試行" button shown under your reply or the コード/相談 switch next to the send button - the app performs the switch; you cannot do it yourself.`
 
 // Compact variant for small local models (<3B params): at that size a long
 // prompt dilutes instruction-following, so the app-context description (only

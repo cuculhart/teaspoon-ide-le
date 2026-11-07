@@ -35,6 +35,9 @@ interface Message {
   // execution order. Rendered as a step card; the same events are also
   // embedded in `content` as note lines for history and legacy clients.
   actions?: AgentAction[]
+  // Set when ask mode blocked a mutating command during this run - the
+  // last reply offers a one-click switch to code mode and resend.
+  canRetryInCodeMode?: boolean
 }
 
 const formatLatency = (ms: number) => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`)
@@ -173,6 +176,9 @@ interface CommandExecutionResult {
   actions?: AgentAction[]
   // Snapshot of files before AI writes - enables rollback
   checkpoint?: { path: string; prevContent: string; existed: boolean }[]
+  // Ask mode blocked at least one mutating command this step - the UI
+  // offers a one-click "retry in code mode" on the run's final reply.
+  blockedInAskMode?: boolean
 }
 
 // Command parsing lives in ../services/commandParser (unit-testable there).
@@ -441,6 +447,7 @@ async function parseAndExecuteFileCommands(
   const pendingWrites: { index: number; path: string; arg: string; body: string }[] = []
   const pendingEdits: { index: number; path: string; arg: string; body: string }[] = []
   const pendingRuns: { index: number; command: string }[] = []
+  let blockedInAskMode = false
 
   // First pass: run reads/lists, collect writes for approval
   for (let i = 0; i < commands.length; i++) {
@@ -461,6 +468,7 @@ async function parseAndExecuteFileCommands(
         'describe it or show the suggested code inside a markdown code fence.'
       )
       needsContinuation = true
+      blockedInAskMode = true
       continue
     }
 
@@ -941,7 +949,7 @@ async function parseAndExecuteFileCommands(
     display += `\n\n⚠️ ${i18nService.t('Deferred to a later response - asking the model to continue now')}`
   }
 
-  return { display: display.trim(), feedback, needsContinuation, checkpoint, actions }
+  return { display: display.trim(), feedback, needsContinuation, checkpoint, actions, blockedInAskMode }
 }
 
 // PTY output contains ANSI escape sequences - strip them before
@@ -1478,6 +1486,28 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     await sendToAI(retryMessage, base)
   }
 
+  // Ask mode blocked a file/command request: switch to code mode and
+  // resend the same user message - the model gets a clean second attempt
+  // without the user having to retype or know the mode names.
+  const handleRetryInCodeMode = () => {
+    if (isLoading || !isConfigured) return
+    let lastUserIndex = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUserIndex = i
+        break
+      }
+    }
+    if (lastUserIndex < 0) return
+    const retryMessage = messages[lastUserIndex]
+    const base = messages.slice(0, lastUserIndex)
+    configService.setChatMode('agent')
+    setChatMode('agent')
+    stickToBottomRef.current = true
+    setMessages([...base, retryMessage])
+    void sendToAI(retryMessage, base)
+  }
+
   const sendToAI = async (userMessage: Message, historyBase: Message[]) => {
     setIsLoading(true)
 
@@ -1582,6 +1612,9 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // Ask mode (read-only): captured once per run so toggling mid-run
       // cannot change the rules under an in-flight agent loop.
       const readOnly = configService.getChatMode() === 'ask'
+      // Set once any step's mutating command was blocked - the run's
+      // final reply then offers a one-click retry in code mode.
+      let askModeBlocked = false
       // The create-project prompt is offered at most once per user turn
       projectPromptShownRef.current = false
 
@@ -1636,7 +1669,8 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         // step - a model that re-reads the file gets only "unchanged",
         // the original content having already scrolled out of reach.
         historyForRequest.push({ role: 'user', content: currentInput, timestamp: Date.now() })
-        const { display, feedback, needsContinuation, checkpoint, actions } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly)
+        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly)
+        if (blockedInAskMode) askModeBlocked = true
         if (controller.signal.aborted) break
         setStreamingText(null)
         if (checkpoint && checkpoint.length > 0) {
@@ -1656,6 +1690,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             tokens: usage,
             rawContent: response,
             actions: actions && actions.length > 0 ? actions : undefined,
+            canRetryInCodeMode: readOnly && askModeBlocked ? true : undefined,
           }
           setMessages((prev) => [...prev, assistantMessage])
         }
@@ -1744,6 +1779,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             tokens: summaryUsage,
             rawContent: summary,
             actions: summaryActions && summaryActions.length > 0 ? summaryActions : undefined,
+            canRetryInCodeMode: readOnly && askModeBlocked ? true : undefined,
           }])
         }
       }
@@ -1938,7 +1974,8 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           </div>
         )}
         {renderItems.map((item, ri) => item.kind === 'run' ? (
-          <details className="agent-run" open key={`run-${ri}`}>
+          <React.Fragment key={`run-${ri}`}>
+          <details className="agent-run" open>
             <summary>
               <span className="agent-run-title">⚙️ {t('Agent run')}</span>
               <span className="agent-run-meta">
@@ -1981,6 +2018,17 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
               )
             })}
           </details>
+          {ri === renderItems.length - 1
+            && item.steps[item.steps.length - 1]?.canRetryInCodeMode && (
+            <button
+              className="retry-code-mode-button"
+              onClick={handleRetryInCodeMode}
+              disabled={isLoading}
+            >
+              {t('Retry in code mode')}
+            </button>
+          )}
+          </React.Fragment>
         ) : (
           <div
             key={item.index}
@@ -2014,6 +2062,15 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
                       : null,
                   ].filter(Boolean).join(' · ')})
                 </div>
+              )}
+              {item.m.role === 'assistant' && item.m.canRetryInCodeMode && item.index === messages.length - 1 && (
+                <button
+                  className="retry-code-mode-button"
+                  onClick={handleRetryInCodeMode}
+                  disabled={isLoading}
+                >
+                  {t('Retry in code mode')}
+                </button>
               )}
             </div>
           </div>
