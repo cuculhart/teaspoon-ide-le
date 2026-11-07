@@ -456,9 +456,9 @@
   "Reference Manual": "リファレンスマニュアル",
   "Hands-on Guide": "ハンズオンガイド",
   "Document not found": "ドキュメントが見つかりません",
-  "Ask mode": "相談モード",
-  "Agent mode": "エージェントモード",
-  "Ask mode: read-only - the AI can inspect files but cannot change them. Click for agent mode.": "相談モード：読み取り専用 - AIはファイルを閲覧できますが変更できません。クリックでエージェントモードへ。",
-  "Agent mode: the AI can edit files and run commands (with approval). Click for ask mode.": "エージェントモード：AIはファイル編集やコマンド実行ができます（要承認）。クリックで相談モードへ。",
-  "Blocked (ask mode)": "相談モードでブロック"
+  "Ask mode": "相談",
+  "Agent mode": "コード",
+  "Ask mode: read-only - the AI can inspect files but cannot change them. Click for agent mode.": "相談：読み取り専用 - AIはファイルを閲覧できますが変更できません。クリックでコードモードへ。",
+  "Agent mode: the AI can edit files and run commands (with approval). Click for ask mode.": "コード：AIはファイル編集やコマンド実行ができます（要承認）。クリックで相談モードへ。",
+  "Blocked (ask mode)": "相談でブロック"
 }
