@@ -1,13 +1,13 @@
 # Teaspoon IDE Local Edition（Teaspoon LE）
 
 <p align="center">
-  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE Local Edition — オフライン優先・ローカル完結の AI IDE">
+  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE ～Local Edition～ — 完全日本語＆オフライン対応 統合開発環境">
 </p>
 
 **Teaspoon IDE Local Edition** は [Teaspoon IDE](https://github.com/cuculhart/teaspoon-ide) のフォークです。ファイルエクスプローラー、コードエディター、AIチャット、Git操作、ターミナルが一体となった、スタンドアロン型のElectron製AIコーディングアシスタントを、**オフライン・ローカル完結**向けに再構成したものです。
 
-- **APIキーなし・クラウドなし・BYOKなし。** AIバックエンドはローカルの [Ollama](https://ollama.com) サーバー（`localhost:11434`）のみ。LANケーブルを抜いても、Wi-Fiを切っても動作します。
-- **日本語のみ。** UI・メニュー・ダイアログ・AIの応答はすべて日本語です。
+- **完全日本語＆オフライン対応。** UI・メニュー・ダイアログ・AIの応答はすべて日本語。LANケーブルを抜いても、Wi-Fiを切っても動作します。
+- **外部送信なし・データ収集なし。** AIバックエンドはローカルの [Ollama](https://ollama.com) サーバー（`localhost:11434`）のみ。プロンプト・コードが外部に送信されることはありません。
 - **情シス部門に説明しやすい。** アカウント・テレメトリ・外部エンドポイントがなく、監査対象は Ollama（MIT）と本アプリだけです。
 
 **Teaspoon** の名前は「小さじ1杯（a teaspoon）のトークンで実用的な仕事をこなす」という設計目標に由来します。デフォルトで送信するコンテキストはファイルツリー（パス一覧）のみで、AI は READ_FILE/GREP を通じて必要な内容だけを取得し、メッセージあたりのトークンを抑えます。
