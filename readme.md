@@ -1,259 +1,263 @@
-# Teaspoon IDE Local Edition (Teaspoon LE)
-
-[日本語](README.ja.md)
+# Teaspoon IDE Local Edition（Teaspoon LE）
 
 <p align="center">
-  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE Local Edition — offline-first, local-only AI IDE">
+  <img src="assets/teaspoon-banner.png" alt="Teaspoon IDE Local Edition — オフライン優先・ローカル完結の AI IDE">
 </p>
 
-**Teaspoon IDE Local Edition** is a fork of [Teaspoon IDE](https://github.com/cuculhart/teaspoon-ide): a standalone Electron-based AI coding assistant that combines a file explorer, code editor, AI chat, Git operations, and a terminal in one app — rebuilt for **offline, local-only operation**.
+**Teaspoon IDE Local Edition** は [Teaspoon IDE](https://github.com/cuculhart/teaspoon-ide) のフォークです。ファイルエクスプローラー、コードエディター、AIチャット、Git操作、ターミナルが一体となった、スタンドアロン型のElectron製AIコーディングアシスタントを、**オフライン・ローカル完結**向けに再構成したものです。
 
-- **No API keys, no cloud, no BYOK.** The only AI backend is a local [Ollama](https://ollama.com) server on `localhost:11434`. Nothing leaves the machine — the app works with the LAN cable unplugged or Wi-Fi off.
-- **Japanese-only UI.** The interface, menus, dialogs, and AI replies default to Japanese.
-- **Corporate-friendly.** No accounts, no telemetry, no external endpoints to review — just Ollama (MIT) plus this app.
+- **APIキーなし・クラウドなし・BYOKなし。** AIバックエンドはローカルの [Ollama](https://ollama.com) サーバー（`localhost:11434`）のみ。LANケーブルを抜いても、Wi-Fiを切っても動作します。
+- **日本語のみ。** UI・メニュー・ダイアログ・AIの応答はすべて日本語です。
+- **情シス部門に説明しやすい。** アカウント・テレメトリ・外部エンドポイントがなく、監査対象は Ollama（MIT）と本アプリだけです。
 
-The name **Teaspoon** reflects the design goal: getting real work done on a teaspoon of tokens. The default context is just the file tree (path list), and the AI fetches file contents on demand via READ_FILE/GREP — keeping each message small.
+**Teaspoon** の名前は「小さじ1杯（a teaspoon）のトークンで実用的な仕事をこなす」という設計目標に由来します。デフォルトで送信するコンテキストはファイルツリー（パス一覧）のみで、AI は READ_FILE/GREP を通じて必要な内容だけを取得し、メッセージあたりのトークンを抑えます。
 
-This is a standalone fork: it does not track upstream releases.
-
-<video src="https://github.com/user-attachments/assets/867c8bcc-93aa-4ee4-90ef-efde5ed735e1" controls width="100%"></video>
+上流リリースの追従は行わない、独立したフォークです。
 
 Author: Cuculhart — Web Site: https://cuculhart.com
 
-## Features
+## 主な機能
 
-### Project Management
+### プロジェクト管理
 
-- **Open Project**: Open any folder as a project via the folder picker
-- **New Project**: Create a project with a name and parent folder
-- **Recent Projects**: Lists frequently/recently opened projects for one-click reopen
-- **Session Restore**: Automatically restores the last project, open file, and chat history after reload or restart
-- **Create Files/Folders**: Inline creation via the 📄+/📁+ buttons in the explorer or the File menu
-- **Drag & Drop**: Drop a folder onto the exe or the app window to open it as a project (`Teaspoon.exe <path>` also works; a second launch hands off to the running instance)
+- **プロジェクトを開く**: フォルダ選択ダイアログから任意のフォルダをプロジェクトとしてオープン
+- **プロジェクト新規作成**: プロジェクト名と親フォルダを指定して新規作成
+- **Recent Projects**: よく開く順（オープン回数+最近順）で一覧表示し、ワンクリックでオープン
+- **セッション復元**: リロードや再起動後に、最後に開いていたプロジェクト・ファイル・チャット履歴を自動復元
+- **ファイル/フォルダ作成**: エクスプローラーの📄+/📁+ボタンまたはメニューからインライン作成
+- **ドラッグ&ドロップ**: exeやアプリウィンドウにフォルダをドロップするとプロジェクトとしてオープン（`Teaspoon.exe <path>` でも可。二重起動時は既存インスタンスに引き渡し）
 
-### Editor
+### エディター
 
-- **Monaco Editor**: Language auto-detection, minimap, syntax highlighting (locally bundled — works offline)
-- **Save**: Ctrl+S / File > Save
-- **Undo/Redo**: Menu and shortcut support (integrated with Monaco's internal history)
-- **Diff View**: Click a changed file in the Git panel to see a side-by-side diff against HEAD
-- **Quick Open**: Ctrl+P (File > Quick Open) — fuzzy file-name search and recently opened files
-- **Full-Text Search**: Project-wide regex-capable search from the sidebar "Search" tab; click a result to jump to the line
+- **Monaco Editor**: 言語自動検出、ミニマップ、シンタックスハイライト
+- **保存**: Ctrl+S / File > Save
+- **Undo/Redo**: メニューおよびショートカット対応（Monaco内部履歴と連携）
+- **差分ビュー**: Gitパネルの変更ファイルをクリックするとHEADとのside-by-side diffを表示
+- **クイックオープン**: Ctrl+P（File > Quick Open）でファイル名ファジー検索、最近開いたファイル一覧表示
+- **全文検索**: サイドバー「Search」タブでプロジェクト横断検索（正規表現対応）、結果クリックで該当行にジャンプ
 
-### AI Chat
+### AIチャット
 
-- **Agent Loop**: The AI issues file-operation commands and works autonomously over multiple steps with feedback (list → read → edit)
-- **Context Management**: Sends the file tree (path list) by default for low token usage; the AI fetches file contents on demand via READ_FILE/GREP. Manual file selection mode is available via the 🧠 button; mode and limits are configurable in Settings > AI Context
-- **Safe Write Control**: Writes are restricted to the project root; writes outside are rejected
-- **Per-Project Chat Persistence**: Conversations are saved per project and restored on reopen
-- **Checkpoints & Rollback**: Snapshots are taken before AI writes; "↩ Rollback" restores only AI-touched files
-- **Create-project prompt**: If the AI tries to write a file while no project is open, a dialog offers to create a project folder (default parent: Documents) and the file operation continues there
-- **Retry / Cancel / Timeout / Response-length limits** supported
+- **エージェントループ**: AIがファイル操作コマンドを発行し、結果をフィードバックしながら複数ステップで自律作業（一覧取得 → 読み込み → 編集）
+- **コンテキスト管理**: デフォルトではファイルツリー（パス一覧）のみを送信してトークンを節約し、AIがREAD_FILE/GREPで必要に応じて内容を取得。🧠ボタンで手動ファイル選択モードに切替可能。モードと上限はSettings > AI Contextで設定可能
+- **安全な書き込み制御**: 書き込みはプロジェクトルート内に限定。外部への書き込みは拒否
+- **プロジェクト別チャット永続化**: プロジェクトごとに会話をlocalStorageに保存し、再オープン時に復元
+- **チェックポイント&ロールバック**: AI書き込み前にスナップショットを取得。「↩ Rollback」でAIが触ったファイルのみ復元
+- **プロジェクト作成プロンプト**: プロジェクト未オープン時にAIがファイル書き込みを試みると、プロジェクトフォルダ作成ダイアログ（既定の親フォルダ: Documents）を表示し、そのままファイル操作を継続
+- **Retryボタン**: 最後の回答を再生成
+- **キャンセル・タイムアウト・応答長制限** 対応済み
 
 ### Git
 
-- **Source Control Panel**: Branch display, ahead/behind counts, changed-file list with status badges
-- **Stage & Commit**: Select files via checkboxes or commit all changes at once
-- **Push / Pull**: From the toolbar; a first push can set upstream automatically when the target remote is unambiguous
-- **Clone**: Enter a repository URL from the Open Project dialog, or clone into an empty open project folder
-- **Remote Setup**: Add or update remotes, create the initial commit when needed, then push a branch with upstream tracking
-- **Repo Init**: Run `git init` on a non-Git folder
-- **Git Config**: Set `user.name` and `user.email` globally or per repository
+- **Source Controlパネル**: ブランチ表示、ahead/behindカウント、変更ファイル一覧（ステータスバッジ付き）
+- **ステージ＆コミット**: チェックボックスで対象選択、または全変更を一括コミット
+- **Push / Pull**: ツールバーから実行。対象リモートが一意に決まる初回pushではupstreamを自動設定
+- **クローン**: プロジェクトを開くダイアログからリポジトリURLを指定、または空の開いているプロジェクトフォルダへクローン
+- **リモート設定**: リモートの追加・更新、必要時の初回コミット作成、upstream設定付きのブランチpushに対応
+- **リポジトリ初期化**: 非Gitフォルダに対して `git init` を実行可能
+- **Git設定**: `user.name` と `user.email` をグローバルまたはリポジトリ単位で設定
 
-### Terminal
+### ターミナル
 
-- **Command Execution**: Runs commands with the project root as the working directory (`npm install`, `npm start`, `docker compose up`, etc.)
-- **Multiple Processes**: Keep a long-running process alive while running other commands
-- **True TTY (node-pty + xterm.js)**: Send keystrokes to interactive CLI programs (REPLs, prompts). ANSI colors and cursor control are rendered
-- **Process Stop**: Stop button terminates the process tree (equivalent to `taskkill /T /F` on Windows)
-- **URL Detection**: Click `http://localhost:...` in the output to open it in a browser
-- **AI-issued Commands**: `// RUN_COMMAND:` always requires user approval; stdout/stderr and the exit code are fed back to the AI
+- **コマンド実行**: プロジェクトルートをカレントディレクトリとしてコマンドを実行（`npm install`、`npm start`、`docker compose up` 等）
+- **複数プロセス同時管理**: 長時間プロセスを動かしたまま別コマンドを実行可能
+- **真のTTY（node-pty + xterm.js）**: 対話型CLIプログラム（入力待ちゲーム、REPL等）にキー入力を送信可能。ANSIカラー・カーソル操作も描画
+- **プロセス停止**: Stopボタンでプロセスツリーごと終了（Windowsではtaskkill /T /F相当）
+- **URL検出**: 出力中の `http://localhost:...` をクリックするとブラウザで開く
+- **AIからのコマンド実行**: `// RUN_COMMAND:` コマンドを発行可能。必ずユーザー承認を挟み、stdout/stderrと終了コードをAIにフィードバック
 
 ### Markdown
 
-- **Preview**: Toggle Preview/Edit for `.md` files in the editor header (marked + DOMPurify, GFM support)
-- **Export**: Export to a self-contained HTML file or PDF (Electron `printToPDF`) — buttons in the editor header or File menu. No extensions or Pandoc required
+- **プレビュー**: `.md` ファイルをエディターヘッダーで Preview/Edit 切替（marked + DOMPurify、GFM対応）
+- **エクスポート**: スタイル埋め込みの単一HTMLファイルまたはPDF（Electron `printToPDF`）へ出力 — エディターヘッダーまたはFileメニューから。拡張機能やPandoc不要
 
-### Appearance & Settings
+### 外観・設定
 
-- **Theme**: System (follows OS via nativeTheme) / Dark / Light, plus office-appropriate named themes: Organic Light, Heritage, Silver Screen
-- **Font**: Family and size applied across the UI and Monaco
-- **Ollama (local AI)**: The only backend - talks to `localhost:11434`, endpoint is fixed. Model picker lists locally installed models (default: `gemma4:e4b`). Optional CPU Threads cap, Context Size (num_ctx), Temperature, and Thinking controls - all via Ollama's native `/api/chat` options
-- **UI Language**: Japanese only (fixed)
-- **Chat focus**: focus toggle in the chat header (⛶ to enter, ◫ to restore panes) or View > Toggle Chat Focus (Ctrl+Shift+B) hides the sidebar/editor/terminal so the chat fills the window; IDE panes return on menu actions that need them, and the mode is remembered across restarts
-- **Chat list**: while chat focus is on, a conversation rail appears beside the chat (list | conversation). Chats are persisted per conversation — including ones started with no project open — as JSON files under userData/chat-history; long chats are compacted into a rolling summary so requests stay within model context limits
+- **テーマ**: System（OS設定連動、nativeTheme経由）/ Dark / Light に加え、オフィス向けのカラーテーマ: Organic Light、Heritage、Silver Screen
+- **フォント**: ファミリー・サイズをUI全体とMonacoエディターに反映
+- **Ollama（ローカルAI）**: 唯一のバックエンド。`localhost:11434` 固定で接続先の設定項目はありません。モデルはローカルにインストール済みのものから選択（既定: `gemma4:e4b`）。CPU Threads（推論スレッド数の上限）、Context Size（num_ctx）、Temperature、Thinking を設定可能。いずれもOllamaネイティブの `/api/chat` オプション経由
+- **UI言語**: 日本語固定
+- **チャットフォーカス**: チャットヘッダーのフォーカス切替ボタン（入るとき⛶、戻るとき◫）または View > Toggle Chat Focus（Ctrl+Shift+B）でサイドバー・エディター・ターミナルを隠し、チャットを全画面表示。IDE系のメニュー操作時は自動で復帰し、状態は再起動後も保持
+- **チャットリスト**: チャットフォーカス中は会話一覧レールが表示され（一覧｜会話の2ペイン）、チャットを切り替えられる。履歴はプロジェクト未オープンの会話を含め会話単位で userData/chat-history 配下のJSONに永続化。長い会話は古い部分をローリング要約に畳み込み、モデルのコンテキスト上限内に収める
 - **About**: Help > About Teaspoon IDE
-- **Native Menus**: File / Edit / View / Window / Help
+- **ネイティブメニュー**: File / Edit / View / Window / Help
 
-## Architecture
+## アーキテクチャ
 
 ```
-Electron App
-├── Main Process (Node.js)
-│   ├── Window management / native menus
-│   ├── File system access
-│   ├── Folder picker dialog
-│   ├── nativeTheme (theme integration)
-│   ├── Terminal/PTY (node-pty)
-│   └── Git operations (simple-git)
-├── Renderer Process (React/TypeScript)
-│   ├── Explorer / Git panel / Search (sidebar tabs)
-│   ├── Editor pane (Monaco / DiffEditor)
-│   ├── Chat pane (agent loop)
-│   ├── Terminal pane (xterm.js)
-│   └── Context management / i18n services
-└── LLM Integration
-    └── Ollama on localhost:11434 (local, offline)
-        └── File-operation commands (agent loop)
+Electron アプリ
+├── メインプロセス (Node.js)
+│   ├── ウィンドウ管理・ネイティブメニュー
+│   ├── ファイルシステムアクセス
+│   ├── フォルダ選択ダイアログ
+│   ├── nativeTheme（テーマ連携）
+│   ├── ターミナル/PTY (node-pty)
+│   └── Git操作 (simple-git)
+├── レンダラープロセス (React/TypeScript)
+│   ├── エクスプローラー / Gitパネル / Search（サイドバータブ）
+│   ├── エディターペイン (Monaco / DiffEditor)
+│   ├── チャットペイン（エージェントループ）
+│   ├── ターミナルペイン (xterm.js)
+│   └── コンテキスト管理 / i18nサービス
+└── LLM統合
+    └── Ollama on localhost:11434（ローカル・オフライン）
+        └── ファイル操作コマンド（エージェントループ）
 ```
 
-## Security & Network Model
+## セキュリティ・ネットワークモデル
 
-Local Edition has **no cloud path at all**:
+Local Edition には**クラウド経路が一切ありません**：
 
-- The renderer talks only to `http://localhost:11434` (Ollama's `/api/chat` and `/api/tags`). There is no endpoint setting, no proxy setting, and no credential storage.
-- The Electron main process exposes no LLM relay, no secrets store, and no managed/organization mode — those upstream features were removed entirely.
-- Ollama's local API has no authentication, so keep it bound to `127.0.0.1` (the default). Do not expose port 11434 on the LAN.
-- For strict no-outbound environments, set `OLLAMA_NO_CLOUD=1` for the Ollama service and/or add a firewall rule blocking Ollama's outbound traffic. Model files must be pre-fetched on a connected machine and copied over (`ollama pull` needs connectivity once).
+- レンダラーが通信するのは `http://localhost:11434`（Ollama の `/api/chat` と `/api/tags`）のみ。接続先・プロキシの設定項目も、資格情報の保存機構もありません。
+- Electron メインプロセスの LLM リレー、シークレットストア、組織（マネージド）モードは上流版から完全に削除しています。
+- Ollama のローカルAPIには認証がないため、`127.0.0.1` バインド（既定）を維持し、ポート11434をLANに公開しないでください。
+- 外部への通信を完全に断ちたい環境では、Ollama サービスに `OLLAMA_NO_CLOUD=1` を設定するか、Ollama のアウトバウンドをブロックするファイアウォール規則を追加してください。モデルファイルは接続可能なマシンで `ollama pull` してからコピーする必要があります。
 
-## Distribution Model
+## 配布・運用モデル
 
-This app is distributed standalone as **source-available** software (license: FSL-1.1-MIT — see the License section).
+このアプリはソース公開型（source-available）ソフトウェアとしてスタンドアロン配布することを想定しています（ライセンスは FSL-1.1-MIT。詳細は「ライセンス」節を参照）。
 
-- **Development**: `npm run dev` starts the Vite dev server (localhost:5173) + Electron
-- **Distribution**: Packaged with Electron Forge; users download and run an installer/zip locally (no dev server needed)
+- **開発時**: `npm run dev` で Vite dev server（localhost:5173）+ Electron を起動
+- **配布時**: Electron Forgeでパッケージ化。ユーザーはインストーラー/zipをローカルにダウンロードして実行（dev server不要）
 
-### CSP Policy
+### CSPポリシーについて
 
-`index.html`'s Content Security Policy allows connections to `localhost`, but this is an allow-list, not a requirement. It is harmless in packaged builds and is what permits the Ollama provider (`http://localhost:11434`) to connect.
+`index.html` のContent Security Policyは `localhost` への接続を許可していますが、これは「許可リスト」であり接続を必須にするものではありません。パッケージ版でも害はなく、Ollamaプロバイダー（`http://localhost:11434`）への接続を可能にします。
 
-### Chat and Projects
+### チャットとプロジェクトの関係
 
-Currently "1 project : 1 chat" — conversations are persisted as JSON files under `userData/chat-history` (including chats started with no project open). Internally they are kept as project → conversation list, so extending to multiple chat tabs is straightforward.
+現在は「1プロジェクト : 1チャット」で、会話は `userData/chat-history` 配下のJSONファイルとして永続化されます（プロジェクト未オープンの会話を含む）。内部的にはプロジェクト→会話リストの構造で保持しているため、複数チャットタブ（1プロジェクト : nチャット）への拡張が容易です。
 
-### Packaging
+### パッケージ化
 
-`npm run package` produces `out/Teaspoon-win32-x64/Teaspoon.exe` (portable); `npm run make` produces a Squirrel installer.
+`npm run package` で `out/Teaspoon-win32-x64/Teaspoon.exe`（ポータブル実行ファイル）、`npm run make` でインストーラー（Squirrel）を生成します。
 
-Implemented packaging work:
+実施済みの対応：
 
-- `electron/main.js` — loads `dist/index.html` via `loadFile` when `app.isPackaged`
-- CSP — strict policy for production builds only (swapped in via `transformIndexHtml` in `vite.config.ts`; removes `'unsafe-inline'` scripts, CDN, `ws:`)
-- Monaco Editor — locally bundled via `src/monacoSetup.ts` (workers included; no CDN, works offline)
-- node-pty — `.node` binaries unpacked from the asar via `asar.unpack`
-- Fatal main-process errors are logged to `%TEMP%/teaspoon-crash.log` (packaged builds have no console)
+- `electron/main.js` — `app.isPackaged` 時は `dist/index.html` を `loadFile` で読み込み
+- CSP — 本番ビルドのみ厳格化（`vite.config.ts` の transformIndexHtml で差し替え。`'unsafe-inline'`スクリプト・CDN・`ws:`を除去）
+- Monaco Editor — `monaco-editor` をローカルバンドル化（`src/monacoSetup.ts` でworkerを同梱、CDN依存解消・オフライン動作）
+- node-pty — `asar.unpack` で `.node` バイナリをasar外に展開
+- メインプロセスの致命的エラーを `%TEMP%/teaspoon-crash.log` に記録（パッケージ版はコンソールが無いため）
 
-## Tech Stack
+## 技術スタック
 
-- **Framework**: Electron + React + TypeScript
-- **Editor**: Monaco Editor
+- **フレームワーク**: Electron + React + TypeScript
+- **エディター**: Monaco Editor
 - **Git**: simple-git
-- **Terminal**: node-pty + xterm.js
-- **LLM**: Ollama on localhost (local only)
-- **Build**: Vite + Electron Forge
-- **Settings**: ConfigService + localStorage
-- **Node.js**: v22 LTS recommended
+- **ターミナル**: node-pty + xterm.js
+- **LLM**: Ollama on localhost（ローカルのみ）
+- **ビルドツール**: Vite + Electron Forge
+- **設定管理**: ConfigService + localStorage
+- **Node.js**: v22 LTS推奨
 
-## Getting Started
+## はじめに
 
-### Prerequisites
+### 前提条件
 
-- Node.js v22 LTS (recommended)
+- Node.js v22 LTS（推奨）
 - npm
-- Git (for the Git panel)
+- Git（Gitパネル使用時）
 
-On Linux/macOS, if your distro's Node is older than v22, install v22 with
-a version manager:
+Linux/macOSでディストリビューションのNodeがv22より古い場合は、
+バージョン管理ツールでv22を導入してください:
 
 ```bash
-# Option A: n
+# 方法A: n
 npm install -g n
 n 22
 
-# Option B: nvm
+# 方法B: nvm
 nvm install 22 && nvm use 22
 ```
 
-### Install
+### インストール
 
 ```bash
 git clone https://github.com/cuculhart/teaspoon-ide.git
 cd teaspoon-ide
 
-# Install dependencies
+# 依存関係のインストール
 npm install
 
-# Run in development mode
+# 開発モードの実行
 npm run dev
 ```
 
-## Usage
+## 使用方法
 
-### Open / Create a Project
+### プロジェクトを開く / 作成する
 
-1. Launch the app
-2. Click the 📂 button in the Explorer
-3. "Select Folder" opens an existing folder; "New Project" creates one
-4. You can also reopen from Recent Projects, or drop a folder on the exe/window
+1. アプリを起動
+2. Explorerの📂ボタンをクリック
+3. 「Select Folder」で既存フォルダを選択、または「New Project」で新規作成
+4. Recent Projectsからの再オープンや、exe/ウィンドウへのフォルダドロップも可能
 
-### Using AI Chat
+### AIチャットを使用する
 
-1. Install and start [Ollama](https://ollama.com) on the same machine, and pull a model (e.g. `ollama pull gemma4:e4b`)
-2. Open Settings (⚙️) > Ollama to confirm the connection and pick a model
-3. Send a message in the chat - replies default to Japanese
+1. 同じマシンに [Ollama](https://ollama.com) をインストールして起動し、モデルを取得（例: `ollama pull gemma4:e4b`）
+2. 設定画面（⚙️）> Ollama で接続とモデルを確認
+3. チャットでメッセージを送信 — 応答は既定で日本語です
 
-### Context Management
+### コンテキスト管理
 
-- **Auto mode**: Sends the file tree (paths); the AI reads file contents on demand via tools
-- **Manual mode**: Click the file-select buttons in the Explorer to add files to the AI context
-- Toggle modes with the 🧠 button; configure in Settings > AI Context
+- **自動モード**: ファイルツリー（パス一覧）を送信。AIはツール経由で必要に応じてファイル内容を取得
+- **手動モード**: エクスプローラーのファイル選択ボタンでAIコンテキストに追加
+- 🧠ボタンで自動/手動モードを切替。Settings > AI Context で設定可能
 
-### AI File Operations
+### AIによるファイル操作
 
-Tell the AI to "create a file" or "edit ○○" and it issues file-operation commands that the app executes:
+AIに「ファイルを作成して」「○○を編集して」と指示すると、AIがファイル操作コマンドを発行し、アプリ側で実行します。
 
-- `// LIST_FILES: <dir>` — List files in a directory
-- `// READ_FILE: <path>` — Read a file
-- `// GREP: <pattern>` — Project-wide content search (regex or substring); returns `file:line: text`
-- `// FIND_FILES: <pattern>` — Search file names/paths by glob (`*.ts`) or substring
-- `// WRITE_FILE: <path>` + `// END_WRITE_FILE` — Create/overwrite a file (via approval dialog)
-- `// EDIT_FILE: <path>` + `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` + `// END_EDIT_FILE` — Partial diff edit (multiple blocks allowed, via approval dialog)
-- `// RUN_COMMAND: <command>` — Run a shell command (via approval dialog; interactive commands work through the PTY)
-- `// CLOSE_PROJECT` — Close the open project (no arguments; same as File > Close Project, no approval needed)
+- `// LIST_FILES: <dir>` — ディレクトリ内のファイル一覧を取得
+- `// READ_FILE: <path>` — ファイルを読み込み
+- `// GREP: <pattern>` — プロジェクト全体を正規表現（または部分一致）で内容検索。`file:line: text`形式で返却
+- `// FIND_FILES: <pattern>` — ファイル名/パスをglob（`*.ts`等）または部分一致で検索
+- `// WRITE_FILE: <path>` + `// END_WRITE_FILE` — ファイルを作成・上書き（承認ダイアログ経由）
+- `// EDIT_FILE: <path>` + `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` + `// END_EDIT_FILE` — 部分差分編集（複数ブロック可、承認ダイアログ経由）
+- `// RUN_COMMAND: <command>` — シェルコマンドを実行（承認ダイアログ経由、PTYで対話型も可）
+- `// CLOSE_PROJECT` — プロジェクトを閉じる（引数なし。File > Close Project と同等のため承認不要）
 
-Results are fed back to the AI, which works autonomously over multiple steps and returns a natural-language summary when done.
+実行結果はAIにフィードバックされるため、AIは複数ステップで自律的に作業し、完了後に自然言語の要約を返します。
 
-**Safety**: Writes are limited to paths inside the project root. Writes outside the project are rejected.
+**安全性**: 書き込みはプロジェクトルート内のパスに限定されます。プロジェクト外への書き込みは拒否されます。
 
-### Git Operations
+### Git操作
 
-1. Open the "Git" tab in the sidebar
-2. Clone a repository from File > Clone Repository / the Open Project dialog, or for a new empty project choose Clone / Initialize Git
-3. Use ⇄ to add/update a remote. If the repository has no commits yet, use Initial Commit, then push the current branch with upstream tracking; use ⚙ for `user.name` / `user.email`
-4. Review changed files (click a file name to see the diff)
-5. Enter a commit message and Commit (checked files only, or all changes)
-6. Use ↑/↓ buttons to Push/Pull; Push sets upstream automatically when the remote is unambiguous
+1. サイドバーの「Git」タブを開く
+2. File > Clone Repositoryまたは「プロジェクトを開く」ダイアログからリポジトリをクローン。新規の空プロジェクトでは「このフォルダへクローン」または「Gitを初期化」を選択
+3. ⇄でリモートを追加・更新。まだコミットが無い場合は「初回コミット」を実行してから、現在のブランチをupstream設定付きでpush。⚙で `user.name` / `user.email` を設定
+4. 変更ファイル一覧を確認（ファイル名クリックでdiff表示）
+5. コミットメッセージを入力してCommit（チェックしたファイルのみ、または全変更）
+6. ↑/↓ボタンでPush/Pull（リモートが一意に決まる場合、Pushはupstreamも自動設定）
 
-## Development
+## 開発
 
 ```bash
-# Development mode
+# 開発モード
 npm run dev
 
-# Production build
+# 本番用ビルド
 npm run build
 
-# Preview
+# プレビュー
 npm run preview
 ```
 
-## License
+## ライセンス
 
-FSL-1.1-MIT (Functional Source License) — Copyright 2026 Cuculhart (see [LICENSE](LICENSE))
+**FSL-1.1-MIT（Functional Source License 1.1 / MIT 将来ライセンス）**
+— Copyright 2026 Cuculhart（正式な条文は [LICENSE](LICENSE) を参照）
 
-- **Source-available**: Free to view, modify, fork, and use personally or internally
-- **Restriction**: No Competing Use — you may not offer the software as a competing commercial product or service (e.g. selling a renamed clone)
-- **Converts to MIT**: Each release automatically becomes MIT-licensed 2 years after publication
-- The "Teaspoon IDE" name is governed separately (see the Trademark clause)
+### 平易なまとめ
 
-Teaspoon IDE is built on open-source components (Monaco Editor, Electron, React, xterm.js, etc.). See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for each component's license and copyright holder. Packaged builds ship these files under `resources/`.
+| | 内容 |
+|---|---|
+| ✅ 自由にできること | 企業内でのクローン・フォーク・改変・監査・社内利用・非商用の教育/研究利用 |
+| ❌ 禁止 | 販売・有償提供・営利目的での利用（**有償セミナーでの利用を含む**）、および Teaspoon LE と同等の機能を持つ商用製品・サービスとしての提供 |
+| ⏳ 将来 | 各リリースから **2年後** に自動的に MIT ライセンスへ移行します |
+
+- 「Teaspoon IDE」「Teaspoon LE」の名称・ロゴはライセンスとは独立して管理されます（商標条項：出典表示と作者クレジット以外の使用は不可）
+- 改変・再配布する場合は、本ライセンス条項（またはそのリンク）と著作権表示を残してください
+
+Teaspoon LE はオープンソースコンポーネント（Monaco Editor、Electron、React、xterm.js 等）を利用しています。各コンポーネントのライセンスと権利者は [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) を参照してください。パッケージ版ではこれらのファイルが `resources/` に同梱されます。

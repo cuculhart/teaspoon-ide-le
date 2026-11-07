@@ -1,10 +1,12 @@
 # Project conventions
 
+Teaspoon IDE Local Edition - a Japanese-only, offline/local-only fork of
+teaspoon-ide. The only AI backend is Ollama on `localhost:11434`.
+
 ## Writing
 
-- `CHANGELOG.md` is English only. Do not include Japanese text (e.g. kana
-  renderings of theme names).
-- `README.ja.md` is the Japanese document; `readme.md` is English.
+- `CHANGELOG.md` and `readme.md` are Japanese. There is no separate
+  `README.ja.md` - `readme.md` is the single documentation file.
 
 ## Verification
 
