@@ -27,6 +27,50 @@ Teaspoon LE は Ollama を AI エンジンとして利用します。プロン�
 インストールが完了すると、Ollama はトレイ（通知領域）に常駐します。
 トレイアイコンを右クリックすると `Quit Ollama` / `Open Console` などのメニューが表示されます。
 
+### 2.1a インストーラー以外のインストール方法
+
+公式サイトのダウンロードページ（https://ollama.com/download）が
+「本当に公式か分からない」という場合や、既にパッケージ管理ツールを
+使っている場合は、次の方法でもインストールできます。
+
+**winget（Windows 標準のパッケージマネージャー）**
+
+PowerShell またはコマンドプロンプトで：
+
+```powershell
+winget install Ollama.Ollama
+```
+
+winget は Windows 10 1809 以降 / Windows 11 に標準搭載されています。
+アプリストア版の検索結果ではなく、Microsoft が管理する
+パッケージリポジトリから取得されるため、公式サイトと同等の
+信頼性があります。
+
+**その他のパッケージマネージャー**
+
+```powershell
+choco install ollama   # Chocolatey を使っている場合
+scoop install ollama   # Scoop を使っている場合
+```
+
+**公式インストールスクリプト（PowerShell）**
+
+```powershell
+irm https://ollama.com/install.ps1 | iex
+```
+
+URL が `ollama.com` ドメインであることを確認した上で実行してください。
+
+> **どの方法でも結果は同じです**
+> いずれの方法でも `ollama` コマンドが PATH に追加され、
+> `http://localhost:11434` で API サーバーが起動します。
+> Teaspoon LE から見た動作に違いはありません。
+>
+> Teaspoon LE のターミナルパネル（本物のシェル）からも
+> これらのコマンドは実行できます。ただし初回インストールは
+> UAC の昇格確認や長時間のダウンロードを伴うため、
+> 手動での実行を推奨します。
+
 > **社内・オフライン環境の場合**
 > インストールには一度だけインターネット接続が必要です。
 > 完全にオフラインの環境へ配布する場合は、接続可能なマシンで
