@@ -15,9 +15,21 @@ let dict = {}
 // <projectRoot>/lang during development, so users can add translations
 // without rebuilding.
 function langDir() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, 'lang')
-    : path.join(app.getAppPath(), 'lang')
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'lang')
+  }
+  // app.getAppPath() can resolve to electron/ when the app is launched as
+  // `electron electron/main.js` - fall back to the project root.
+  const candidates = [
+    path.join(app.getAppPath(), 'lang'),
+    path.join(app.getAppPath(), '..', 'lang'),
+  ]
+  for (const dir of candidates) {
+    try {
+      if (fsSync.existsSync(path.join(dir, 'ja.json'))) return dir
+    } catch { /* keep looking */ }
+  }
+  return candidates[0]
 }
 
 function loadLanguage(code) {

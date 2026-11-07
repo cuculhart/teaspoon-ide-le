@@ -1816,7 +1816,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           )}
           {onToggleFocus && (
             <button
-              className={`settings-button ${chatFocus ? 'active' : ''}`}
+              className={`settings-button chat-focus-button ${chatFocus ? 'active' : ''}`}
               onClick={onToggleFocus}
               title={chatFocus ? t('Exit chat focus') : t('Chat focus')}
             >

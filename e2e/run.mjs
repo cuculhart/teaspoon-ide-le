@@ -433,10 +433,10 @@ test('F-3  chat focus toggled during streaming keeps generating', async () => {
     await mockModel(page, ['F3_DONE'], reqs, { delayMs: 2000 })
     await sendChat(page, 'hello')
     await page.waitForSelector('.loading-dots', { timeout: 15000 })
-    await page.click('button[title="Chat focus"]')
+    await page.click('button.chat-focus-button')
     await page.waitForSelector('.chat-list-rail', { timeout: 10000 })
     await waitForMarker(page, 'F3_DONE')
-    await page.click('button[title="Exit chat focus"]')
+    await page.click('button.chat-focus-button')
     await page.waitForSelector('.chat-list-rail', { state: 'detached', timeout: 10000 })
   } finally { await app.close() }
 })
@@ -548,9 +548,10 @@ test('R-1  dedup "unchanged" reply is backed by the retained payload', async () 
     // Step 2's request: the current prompt is the dedup reply (it must
     // NOT contain the payload), while an earlier history entry still
     // carries the original tool result.
+    // Ollama request shape: { messages: [{role, content}] }
     const body = JSON.parse(reqs[2])
-    const texts = (body.contents ?? [])
-      .map((c) => (c.parts ?? []).map((p) => p.text ?? '').join(''))
+    const texts = (body.messages ?? [])
+      .map((m) => m.content ?? '')
     const last = texts[texts.length - 1] ?? ''
     assert.ok(last.includes('unchanged since your previous read'),
       `dedup reply did not fire - last request part was:\n${last}`)

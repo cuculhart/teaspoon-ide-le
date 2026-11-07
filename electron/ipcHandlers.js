@@ -4,7 +4,7 @@ const path = require('path')
 const { simpleGit } = require('simple-git')
 const { spawn } = require('child_process')
 const pty = require('node-pty')
-const { ipcMain, dialog, nativeTheme, shell, BrowserWindow } = require('electron')
+const { ipcMain, dialog, nativeTheme, shell, BrowserWindow, app } = require('electron')
 const { langDir, t } = require('./i18n')
 
 // Running terminal processes, keyed by a small app-level id
@@ -60,6 +60,7 @@ function isAllowedNewDirectory(p) {
 
 const deniedPath = () => ({ success: false, error: t('Path is outside the allowed folders') })
 
+function setupIpcHandlers() {
   // File system operations
   // The renderer registers each project folder it opens. Consent-proof
   // registration happens via native dialogs / CLI args / create & clone;
