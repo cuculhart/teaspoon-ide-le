@@ -452,5 +452,8 @@
   "Sampling temperature sent to Ollama. Empty = default 0.2 - measured runs showed the model-default ~1.0 causes drift and hallucinated details in agent loops. Lower = more deterministic.": "Ollama に送信するサンプリング温度。空欄 = 既定値 0.2 - モデル既定の約 1.0 はエージェントループでブレや誤情報の原因になることが計測済みです。低いほど決定的になります。",
   "Force reasoning on/off, or pick an effort level, for models that support it (qwen3.5, gpt-oss, gemma4, ...). Empty = default Low - much faster replies on slow hardware. gpt-oss and gemma4 cannot fully disable thinking - use Low for them.": "対応モデル（qwen3.5、gpt-oss、gemma4 など）で推論のオン/オフまたは強度を指定します。空欄 = 既定値「低」- 低速環境で大幅に高速化。gpt-oss と gemma4 は思考を完全には無効化できません - それらには「低」を使用してください。",
   "Ollama is not running. Start the Ollama app or run \"ollama serve\", then check again.": "Ollama が起動していません。Ollama アプリを起動するか「ollama serve」を実行してから、再確認してください。",
-  "Retry": "再確認"
+  "Retry": "再確認",
+  "Reference Manual": "リファレンスマニュアル",
+  "Hands-on Guide": "ハンズオンガイド",
+  "Document not found": "ドキュメントが見つかりません"
 }

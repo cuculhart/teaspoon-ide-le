@@ -79,7 +79,8 @@ Author: Cuculhart — Web Site: https://cuculhart.com
 - **UI言語**: 日本語固定
 - **チャットフォーカス**: チャットヘッダーのフォーカス切替ボタン（入るとき⛶、戻るとき◫）または View > Toggle Chat Focus（Ctrl+Shift+B）でサイドバー・エディター・ターミナルを隠し、チャットを全画面表示。IDE系のメニュー操作時は自動で復帰し、状態は再起動後も保持
 - **チャットリスト**: チャットフォーカス中は会話一覧レールが表示され（一覧｜会話の2ペイン）、チャットを切り替えられる。履歴はプロジェクト未オープンの会話を含め会話単位で userData/chat-history 配下のJSONに永続化。長い会話は古い部分をローリング要約に畳み込み、モデルのコンテキスト上限内に収める
-- **About**: Help > About Teaspoon IDE
+- **ドキュメント**: Help メニューから「リファレンスマニュアル」「ハンズオンガイド」（PDF）を開けます。ソースは `docs/` にあり、`npm run docs:pdf` で再生成できます
+- **About**: Help > About Teaspoon IDE Local Edition
 - **ネイティブメニュー**: File / Edit / View / Window / Help
 
 ## アーキテクチャ

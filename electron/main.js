@@ -184,6 +184,14 @@ function buildMenu() {
       label: t('Help'),
       submenu: [
         {
+          label: t('Reference Manual'),
+          click: () => openDoc('manual'),
+        },
+        {
+          label: t('Hands-on Guide'),
+          click: () => openDoc('hands-on'),
+        },
+        {
           label: t('About Teaspoon IDE Local Edition'),
           click: () => sendMenuAction('about'),
         },
@@ -192,6 +200,27 @@ function buildMenu() {
   ]
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
+// Bundled documentation PDFs (docs/*.pdf). Packaged builds ship them via
+// extraResource under resources/docs; dev mode reads them from the repo.
+function docsDir() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'docs')
+    : path.join(app.getAppPath(), 'docs')
+}
+
+function openDoc(name) {
+  const { shell, dialog } = require('electron')
+  const pdf = path.join(docsDir(), `${name}.pdf`)
+  if (!fsSync.existsSync(pdf)) {
+    dialog.showErrorBox(
+      'Teaspoon IDE Local Edition',
+      i18n.t('Document not found') + `: ${pdf}`,
+    )
+    return
+  }
+  shell.openPath(pdf)
 }
 
 async function createWindow() {

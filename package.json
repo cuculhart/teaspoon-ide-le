@@ -17,7 +17,8 @@
     "package": "npm run build:vite && electron-forge package",
     "make": "npm run build:vite && electron-forge make",
     "test:e2e": "node e2e/run.mjs",
-    "test:parser": "node e2e/parser.test.mjs"
+    "test:parser": "node e2e/parser.test.mjs",
+    "docs:pdf": "electron scripts/make-docs-pdf.js"
   },
   "keywords": [
     "electron",
