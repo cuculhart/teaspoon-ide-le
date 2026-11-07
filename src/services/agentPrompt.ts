@@ -87,6 +87,14 @@ It takes no arguments and closes the project immediately (the same as File > Clo
 
 export const AGENT_SYSTEM_PROMPT = APP_CONTEXT_PROMPT + AGENT_INSTRUCTIONS
 
+// Appended to the system prompt in ask (read-only) mode. The agent loop
+// also blocks WRITE_FILE/EDIT_FILE/RUN_COMMAND/CLOSE_PROJECT, so this is
+// belt-and-suspenders: it steers the model to answer in text instead of
+// emitting commands that would just bounce back as failures.
+export const ASK_MODE_NOTE = `
+
+MODE: Ask (read-only) mode is active. You may inspect the project with READ_FILE, LIST_FILES, GREP, and FIND_FILES, but you MUST NOT emit WRITE_FILE, EDIT_FILE, RUN_COMMAND, or CLOSE_PROJECT - they are disabled and will be blocked. Answer questions, review code, and explain problems in text (markdown is fine). If the user asks for a change, describe exactly what to change or show the suggested code inside a markdown code fence - never as file commands.`
+
 // Compact variant for small local models (<3B params): at that size a long
 // prompt dilutes instruction-following, so the app-context description (only
 // relevant when the user asks about Teaspoon IDE itself) is dropped and just the

@@ -19,6 +19,11 @@ export type ContextMode = 'tree' | 'full'
 // that support levels (gpt-oss, qwen3, ...).
 export type OllamaThink = boolean | 'low' | 'medium' | 'high'
 
+// Chat mode: 'agent' may read/write files and run commands (approval
+// gated); 'ask' is read-only - the AI can inspect the project but file
+// changes, shell commands, and CLOSE_PROJECT are blocked.
+export type ChatMode = 'agent' | 'ask'
+
 // Local Edition has no credentials at all: the only backend is a local
 // Ollama server, so every setting is plain localStorage. There is no
 // secret store, no API key, no proxy, no managed mode.
@@ -36,6 +41,7 @@ const STORAGE_KEYS: Record<string, string> = {
   OLLAMA_NUM_CTX: 'ollama_num_ctx',
   OLLAMA_TEMPERATURE: 'ollama_temperature',
   OLLAMA_THINK: 'ollama_think',
+  CHAT_MODE: 'chat_mode',
 }
 
 class ConfigService {
@@ -61,6 +67,7 @@ class ConfigService {
     const ollamaNumCtx = localStorage.getItem('ollama_num_ctx')
     const ollamaTemperature = localStorage.getItem('ollama_temperature')
     const ollamaThink = localStorage.getItem('ollama_think')
+    const chatMode = localStorage.getItem('chat_mode')
 
     if (theme) this.config.set('THEME', theme)
     if (uiFontFamily) this.config.set('UI_FONT_FAMILY', uiFontFamily)
@@ -73,6 +80,7 @@ class ConfigService {
     if (ollamaNumCtx) this.config.set('OLLAMA_NUM_CTX', ollamaNumCtx)
     if (ollamaTemperature) this.config.set('OLLAMA_TEMPERATURE', ollamaTemperature)
     if (ollamaThink) this.config.set('OLLAMA_THINK', ollamaThink)
+    if (chatMode) this.config.set('CHAT_MODE', chatMode)
   }
 
   get(key: string): string | undefined {
@@ -280,6 +288,17 @@ class ConfigService {
     } else {
       this.set('OLLAMA_THINK', think === true ? '1' : think === false ? '0' : think)
     }
+  }
+
+  // 'agent' (default) keeps the full tool set; 'ask' restricts the AI to
+  // read-only inspection commands - enforced in the agent loop, not just
+  // by prompt.
+  getChatMode(): ChatMode {
+    return this.get('CHAT_MODE') === 'ask' ? 'ask' : 'agent'
+  }
+
+  setChatMode(mode: ChatMode): void {
+    this.set('CHAT_MODE', mode)
   }
 
   // Japanese-only edition: the UI language is fixed. The key stays so

@@ -274,7 +274,10 @@ async function parseAndExecuteFileCommands(
     // model has read and files it has successfully changed.
     readFiles?: Set<string>
     modifiedFiles?: Set<string>
-  }
+  },
+  // Ask (read-only) mode: WRITE_FILE/EDIT_FILE/RUN_COMMAND/CLOSE_PROJECT
+  // are blocked before any approval prompt or disk/shell access.
+  readOnly?: boolean
 ): Promise<CommandExecutionResult> {
   const { commands, docSpans } = findFileCommands(response)
 
@@ -362,7 +365,7 @@ async function parseAndExecuteFileCommands(
   const creationIntent = /(作成|作って|作る|生成|実装|create|write|generate|make|build)/i.test(userText)
 
   if (commands.length === 0 && malformedBlocks.length === 0 && inventedCmds.length === 0
-    && !echoingResults && !deferred && !(creationIntent && hasFence)) {
+    && !echoingResults && !deferred && !(creationIntent && hasFence && !readOnly)) {
     return { display: response, feedback: [], needsContinuation: false }
   }
   if (!window.electronAPI) {
@@ -381,7 +384,7 @@ async function parseAndExecuteFileCommands(
   // No project open but the model wants to write files: offer to create
   // a project folder instead of rejecting every command. When the user
   // creates one, path resolution below picks it up via projectService.
-  if (requestProject && !projectService.getCurrentProject()?.isOpen
+  if (requestProject && !readOnly && !projectService.getCurrentProject()?.isOpen
     && commands.some(c => c.type === 'write' || c.type === 'edit')) {
     if (await requestProject()) {
       feedback.push('A project folder was created and opened - file paths are relative to its root.')
@@ -427,7 +430,7 @@ async function parseAndExecuteFileCommands(
     actions.push({ kind: 'notice', label: i18nService.t('Deferred to a later response - asking the model to continue now'), target: '', status: 'failed' })
     needsContinuation = true
   }
-  if (commands.length === 0 && creationIntent && hasFence) {
+  if (commands.length === 0 && creationIntent && hasFence && !readOnly) {
     feedback.push(
       'You showed code inside a markdown code fence - fenced lines are shown to the user as text and never executed, so nothing was written to disk. ' +
       'Emit the command OUTSIDE any code fence: "// WRITE_FILE: <file_path>", the content, then "// END_WRITE_FILE".'
@@ -442,6 +445,25 @@ async function parseAndExecuteFileCommands(
   // First pass: run reads/lists, collect writes for approval
   for (let i = 0; i < commands.length; i++) {
     const cmd = commands[i]
+
+    // Ask (read-only) mode: mutating commands never reach approval,
+    // disk, or the shell - they bounce back to the model as feedback.
+    if (readOnly && (cmd.type === 'write' || cmd.type === 'edit' || cmd.type === 'run' || cmd.type === 'close')) {
+      const name = cmd.type === 'write' ? 'WRITE_FILE'
+        : cmd.type === 'edit' ? 'EDIT_FILE'
+        : cmd.type === 'run' ? 'RUN_COMMAND' : 'CLOSE_PROJECT'
+      notes[i] = `🚫 ${i18nService.t('Blocked (ask mode)')}: ${name}`
+      actions.push({ kind: 'notice', label: i18nService.t('Blocked (ask mode)'), target: `${name} ${cmd.arg}`.trim(), status: 'failed' })
+      feedback.push(
+        `${name} ${cmd.arg}: blocked - ask (read-only) mode is active. ` +
+        'WRITE_FILE, EDIT_FILE, RUN_COMMAND, and CLOSE_PROJECT are disabled. ' +
+        'Do not emit them again - answer the user in text; if a change is needed, ' +
+        'describe it or show the suggested code inside a markdown code fence.'
+      )
+      needsContinuation = true
+      continue
+    }
+
     const resolved = resolveFilePath(cmd.arg)
 
     if (cmd.type === 'write') {
@@ -912,7 +934,7 @@ async function parseAndExecuteFileCommands(
   if (echoingResults) {
     display += `\n\n⚠️ ${i18nService.t('Result block imitated - asking the model to retry')}`
   }
-  if (commands.length === 0 && creationIntent && hasFence) {
+  if (commands.length === 0 && creationIntent && hasFence && !readOnly) {
     display += `\n\n⚠️ ${i18nService.t('Code shown but not written - asking the model to retry')}`
   }
   if (deferred) {
@@ -995,6 +1017,9 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   const checkpointsRef = useRef<{ path: string; prevContent: string; existed: boolean }[][]>([])
   const [canRollback, setCanRollback] = useState(false)
   const [confirmClearChat, setConfirmClearChat] = useState(false)
+  // Ask (read-only) vs agent mode - persisted in configService. The mode
+  // is read once per send, so toggling never affects an in-flight run.
+  const [chatMode, setChatMode] = useState<'agent' | 'ask'>(() => configService.getChatMode())
 
   const handleRollback = async () => {
     const cp = checkpointsRef.current.pop()
@@ -1554,6 +1579,9 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // One-shot guard: nudge the model at most once when it declares
       // completion while a failure is still unresolved.
       let failureNudged = false
+      // Ask mode (read-only): captured once per run so toggling mid-run
+      // cannot change the rules under an in-flight agent loop.
+      const readOnly = configService.getChatMode() === 'ask'
       // The create-project prompt is offered at most once per user turn
       projectPromptShownRef.current = false
 
@@ -1608,7 +1636,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         // step - a model that re-reads the file gets only "unchanged",
         // the original content having already scrolled out of reach.
         historyForRequest.push({ role: 'user', content: currentInput, timestamp: Date.now() })
-        const { display, feedback, needsContinuation, checkpoint, actions } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState)
+        const { display, feedback, needsContinuation, checkpoint, actions } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly)
         if (controller.signal.aborted) break
         setStreamingText(null)
         if (checkpoint && checkpoint.length > 0) {
@@ -1702,7 +1730,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         let summaryUsage: Message['tokens']
         const summary = await sendAgent(summaryInput, onSummaryDelta, (u) => { summaryUsage = u })
         const summaryLatencyMs = Math.round(performance.now() - summaryStart)
-        const { display: summaryDisplay, actions: summaryActions } = await parseAndExecuteFileCommands(summary, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject)
+        const { display: summaryDisplay, actions: summaryActions } = await parseAndExecuteFileCommands(summary, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, undefined, readOnly)
         if (controller.signal.aborted) return
         setStreamingText(null)
         const summaryText = summaryDisplay || getSummaryStreamed()
@@ -1838,6 +1866,19 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
               {chatFocus ? '◫' : '⛶'}
             </button>
           )}
+          <button
+            className={`settings-button chat-mode-button ${chatMode === 'ask' ? 'active' : ''}`}
+            onClick={() => {
+              const next = chatMode === 'ask' ? 'agent' : 'ask'
+              configService.setChatMode(next)
+              setChatMode(next)
+            }}
+            title={chatMode === 'ask'
+              ? t('Ask mode: read-only - the AI can inspect files but cannot change them. Click for agent mode.')
+              : t('Agent mode: the AI can edit files and run commands (with approval). Click for ask mode.')}
+          >
+            {chatMode === 'ask' ? t('Ask mode') : t('Agent mode')}
+          </button>
           <button className="settings-button" onClick={onOpenSettings} title={t('Settings')}>
             ⚙️
           </button>

@@ -4,6 +4,7 @@ import { projectService } from './projectService'
 import {
   AGENT_SYSTEM_PROMPT,
   AGENT_SYSTEM_PROMPT_COMPACT,
+  ASK_MODE_NOTE,
   NO_PROJECT_SYSTEM_PROMPT,
   hostOsName,
   hostOpenCommand,
@@ -161,6 +162,9 @@ class OllamaService {
     const model = modelOverride || this.getModel()
     const caps = this.capabilities(model)
     const projectOpen = !!projectService.getCurrentProject()?.isOpen
+    // Ask mode swaps the "you may write files" instructions for a
+    // read-only note; the agent loop enforces the same restriction.
+    const askMode = configService.getChatMode() === 'ask'
     const systemPrompt = !projectOpen
       ? NO_PROJECT_SYSTEM_PROMPT
       : caps.promptVariant === 'compact'
@@ -174,7 +178,7 @@ class OllamaService {
       : `The app runs on ${hostOsName()}.`
 
     const messages: Array<{ role: string; content: string }> = [
-      { role: 'system', content: `${systemPrompt.trim()}\n\n${osNote}` },
+      { role: 'system', content: `${systemPrompt.trim()}\n\n${osNote}${askMode ? ASK_MODE_NOTE : ''}` },
     ]
 
     for (const msg of caps.historyWindow ? history.slice(-caps.historyWindow) : history) {
