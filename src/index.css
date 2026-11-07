@@ -1,0 +1,499 @@
+:root {
+  color-scheme: dark;
+  /* Dark theme (default) */
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-tertiary: #2d2d2d;
+  --bg-deep: #1a1a1a;
+  --bg-hover: #2a2d2e;
+  --bg-active: #3c3c3c;
+  --bg-hover-strong: #4c4c4c;
+  --border-color: #3c3c3c;
+  --border-strong: #5c5c5c;
+  --text-primary: #d4d4d4;
+  --text-secondary: #cccccc;
+  --text-tertiary: #858585;
+  --text-muted: #6e6e6e;
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --on-accent: #ffffff;
+  --accent-soft: #1e3a5f;
+  --selected-bg: #264f78;
+  --error: #f48771;
+  --error-hover: #ff6b6b;
+  --diff-added: #73c991;
+  --diff-removed: #f14c4c;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.3);
+  /* Chat bubbles default to the accent/subtle pairing; individual
+     themes override these to taste */
+  --bubble-user: var(--accent);
+  --on-bubble-user: var(--on-accent);
+  --bubble-user-border: transparent;
+  --bubble-ai: var(--bg-active);
+  --on-bubble-ai: var(--text-primary);
+  --bubble-ai-border: transparent;
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f3f3;
+  --bg-tertiary: #e8e8e8;
+  --bg-deep: #f8f8f8;
+  --bg-hover: #e0e0e0;
+  --bg-active: #dcdcdc;
+  --bg-hover-strong: #d0d0d0;
+  --border-color: #d4d4d4;
+  --border-strong: #adadad;
+  --text-primary: #333333;
+  --text-secondary: #444444;
+  --text-tertiary: #6e6e6e;
+  --text-muted: #999999;
+  --accent: #0078d4;
+  --accent-hover: #106ebe;
+  --accent-soft: #cfe8fa;
+  --selected-bg: #add6ff;
+  --error: #d13438;
+  --error-hover: #a4262c;
+  --diff-added: #1a7f37;
+  --diff-removed: #cf222e;
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --shadow: rgba(0, 0, 0, 0.15);
+}
+
+/* Organic Light (internal id: 'quiet'): muted warm-paper palette for
+   users who find pure white backgrounds glaring */
+[data-theme='quiet'] {
+  color-scheme: light;
+  --bg-primary: #f5f1e8;
+  --bg-secondary: #efe9dc;
+  --bg-tertiary: #e7dfcf;
+  --bg-deep: #faf7f0;
+  --bg-hover: #eae3d3;
+  --bg-active: #ded4bf;
+  --bg-hover-strong: #d2c7ae;
+  --border-color: #d9cfba;
+  --border-strong: #b5a98e;
+  --text-primary: #4a463c;
+  --text-secondary: #57524a;
+  --text-tertiary: #88816f;
+  --text-muted: #a29a86;
+  --accent: #4f7d7a;
+  --accent-hover: #416b68;
+  --accent-soft: #d3e0da;
+  --selected-bg: #cddbd2;
+  --error: #b0503f;
+  --error-hover: #96402f;
+  --diff-added: #4e8a55;
+  --diff-removed: #b35040;
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --shadow: rgba(0, 0, 0, 0.15);
+}
+
+/* Muted Ocean: deep-sea blue, Night Owl-inspired but with lower text
+   luminance and saturation for long sessions */
+[data-theme='ocean'] {
+  color-scheme: dark;
+  --bg-primary: #0a1b2a;
+  --bg-secondary: #0e2233;
+  --bg-tertiary: #122a3d;
+  --bg-deep: #081726;
+  --bg-hover: #13314a;
+  --bg-active: #17405c;
+  --bg-hover-strong: #1d4a6b;
+  --border-color: #1c3a50;
+  --border-strong: #2a5470;
+  --text-primary: #a9bdd0;
+  --text-secondary: #9fb3c6;
+  --text-tertiary: #5d7080;
+  --text-muted: #4a5d6c;
+  --accent: #b3922f;
+  --accent-hover: #c9a642;
+  --on-accent: #1c1408;
+  --accent-soft: #25344a;
+  --selected-bg: #1d4a6b;
+  --bubble-user: #8fa7b8;
+  --on-bubble-user: #10222f;
+  --bubble-ai: #122a3d;
+  --error: #e07a6a;
+  --error-hover: #f08a7a;
+  --diff-added: #5aa07a;
+  --diff-removed: #c96a5a;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.35);
+}
+
+/* Ancient Console: green-phosphor CRT homage. The editor pane is the
+   brightest green surface; UI chrome recedes darker around it */
+[data-theme='console'] {
+  color-scheme: dark;
+  --bg-primary: #0c2214;
+  --bg-secondary: #0d1a10;
+  --bg-tertiary: #16301d;
+  --bg-deep: #0a150c;
+  --bg-hover: #14301c;
+  --bg-active: #1a3d24;
+  --bg-hover-strong: #21492d;
+  --border-color: #1e3823;
+  --border-strong: #2c4f34;
+  --text-primary: #93b494;
+  --text-secondary: #84a485;
+  --text-tertiary: #57745a;
+  --text-muted: #47614a;
+  --accent: #7fae72;
+  --accent-hover: #93c186;
+  --on-accent: #0d1a10;
+  --accent-soft: #1a3321;
+  --selected-bg: #1f4228;
+  --error: #d08a6a;
+  --error-hover: #e09a7a;
+  --diff-added: #7fae72;
+  --diff-removed: #d08a6a;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.35);
+}
+
+/* Walnut: warm dark wood tones with cool silvery text (a bright nail
+   driven into dark wood) */
+[data-theme='walnut'] {
+  color-scheme: dark;
+  --bg-primary: #2e2119;
+  --bg-secondary: #281c14;
+  --bg-tertiary: #3a2b20;
+  --bg-deep: #241a12;
+  --bg-hover: #3a2c1f;
+  --bg-active: #473626;
+  --bg-hover-strong: #544131;
+  --border-color: #4a382a;
+  --border-strong: #63503e;
+  --text-primary: #c2c7cb;
+  --text-secondary: #b3b8bc;
+  --text-tertiary: #857262;
+  --text-muted: #6f6152;
+  --accent: #b08d57;
+  --accent-hover: #c4a06a;
+  --on-accent: #1a1208;
+  --accent-soft: #3d2f22;
+  --selected-bg: #4a3a2a;
+  --error: #d98a70;
+  --error-hover: #e89a80;
+  --diff-added: #8aa86a;
+  --diff-removed: #d07a5a;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.4);
+}
+
+/* Heritage: pale pine woodgrain with reddish-black groove text -
+   the beige-box PC era */
+[data-theme='heritage'] {
+  color-scheme: light;
+  --bg-primary: #e6d7bd;
+  --bg-secondary: #dccdb0;
+  --bg-tertiary: #d2c2a3;
+  --bg-deep: #efe6d2;
+  --bg-hover: #d6c7a9;
+  --bg-active: #c9b797;
+  --bg-hover-strong: #bda987;
+  --border-color: #b8a486;
+  --border-strong: #98876a;
+  --text-primary: #2b1d17;
+  --text-secondary: #3d2c22;
+  --text-tertiary: #8a7a66;
+  --text-muted: #a3937d;
+  --accent: #8a5a33;
+  --accent-hover: #714824;
+  --accent-soft: #e0d3b5;
+  --selected-bg: #cdbb97;
+  --error: #a04030;
+  --error-hover: #8a3428;
+  --diff-added: #4e7a45;
+  --diff-removed: #a04535;
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --shadow: rgba(60, 40, 20, 0.2);
+}
+
+/* Rich Wine: red-tinted near-black with cool silvery text - a cocktail
+   spoon against wine under bar lighting. Keywords are copper-orange,
+   not red, so code never reads as errors */
+[data-theme='wine'] {
+  color-scheme: dark;
+  --bg-primary: #1e0a0d;
+  --bg-secondary: #261114;
+  --bg-tertiary: #331a1e;
+  --bg-deep: #140607;
+  --bg-hover: #30171b;
+  --bg-active: #3d1f24;
+  --bg-hover-strong: #472429;
+  --border-color: #4a2228;
+  --border-strong: #5e2e35;
+  --text-primary: #cbd1d6;
+  --text-secondary: #a8b0b6;
+  --text-tertiary: #8a6268;
+  --text-muted: #6e4a52;
+  --accent: #d99138;
+  --accent-hover: #e5a44c;
+  --on-accent: #1e0a0d;
+  --accent-soft: #3a2712;
+  --selected-bg: #4d2430;
+  --bubble-user: #5c3d28;
+  --on-bubble-user: #e8dcc4;
+  --bubble-ai: #331a1e;
+  --error: #e07060;
+  --error-hover: #f08070;
+  --diff-added: #7fa06a;
+  --diff-removed: #c96a5a;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.4);
+}
+
+/* Violet Fizz: deep violet cocktail base with moon-yellow accent and
+   neon-blue keywords - a bar-lit glass of violet fizz */
+[data-theme='fizz'] {
+  color-scheme: dark;
+  --bg-primary: #251c35;
+  --bg-secondary: #1e162b;
+  --bg-tertiary: #33254a;
+  --bg-deep: #191124;
+  --bg-hover: #332547;
+  --bg-active: #3d2c57;
+  --bg-hover-strong: #4a3568;
+  --border-color: #3f2f5c;
+  --border-strong: #5a4480;
+  --text-primary: #ece6f0;
+  --text-secondary: #d4cbe0;
+  --text-tertiary: #8f80a6;
+  --text-muted: #6b5b85;
+  --accent: #ffea00;
+  --accent-hover: #ffe733;
+  --on-accent: #241a30;
+  --accent-soft: #463d1f;
+  --selected-bg: #4a3a6e;
+  --error: #ff5f7a;
+  --error-hover: #ff7590;
+  --diff-added: #6fcf97;
+  --diff-removed: #ff6b7f;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.4);
+}
+
+/* Otegami: warm washi paper with soot-ink text and vermilion accents -
+   a letter written on Japanese paper */
+[data-theme='otegami'] {
+  color-scheme: light;
+  --bg-primary: #f3eeda;
+  --bg-secondary: #ede9dc;
+  --bg-tertiary: #e6dfc9;
+  --bg-deep: #f9f6ec;
+  --bg-hover: #e8e1cc;
+  --bg-active: #ded6bb;
+  --bg-hover-strong: #d2c8ab;
+  --border-color: #d8ceba;
+  --border-strong: #b5a98e;
+  --text-primary: #2b2b2b;
+  --text-secondary: #4a453c;
+  --text-tertiary: #8a8272;
+  --text-muted: #a39e93;
+  --accent: #b8261e;
+  --accent-hover: #9e1f19;
+  --accent-soft: #eadfd0;
+  --selected-bg: #dcd2b8;
+  --bubble-user: #d6c49c;
+  --on-bubble-user: #2b2b2b;
+  --bubble-user-border: #b3a37e;
+  --bubble-ai: #fdfbf7;
+  --bubble-ai-border: #d8d1bd;
+  --error: #9e2a1f;
+  --error-hover: #84211a;
+  --diff-added: #5e7a46;
+  --diff-removed: #a83226;
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --shadow: rgba(60, 40, 20, 0.2);
+}
+
+/* Soda Float: mid sky-blue soda water with ink-black text and a
+   lemon-yellow accent - pale foam colors float on the surface */
+[data-theme='float'] {
+  color-scheme: light;
+  --bg-primary: #75b1de;
+  --bg-secondary: #66a2d1;
+  --bg-tertiary: #5793c4;
+  --bg-deep: #85bfe8;
+  --bg-hover: #5f9acb;
+  --bg-active: #5289b8;
+  --bg-hover-strong: #487cad;
+  --border-color: #5a97c2;
+  --border-strong: #3d7aa8;
+  --text-primary: #121416;
+  --text-secondary: #1c3f52;
+  --text-tertiary: #2f5464;
+  --text-muted: #4a6a7a;
+  --accent: #ffd600;
+  --accent-hover: #e6c000;
+  --on-accent: #121416;
+  --accent-soft: #e6dda8;
+  --selected-bg: #5793c4;
+  --bubble-user: #ffffff;
+  --on-bubble-user: #123a4a;
+  --bubble-user-border: #d8ecf5;
+  --bubble-ai: #2e6d9e;
+  --on-bubble-ai: #eef7fc;
+  --error: #b0341f;
+  --error-hover: #8f2818;
+  --diff-added: #1e7a4a;
+  --diff-removed: #b0341f;
+  --overlay-bg: rgba(0, 0, 0, 0.4);
+  --shadow: rgba(0, 30, 60, 0.25);
+}
+
+/* Modern Syntax eXtensible (MSX): saturated MSX-blue screen with white
+   text - modernized 16-color-palette brights on the classic blue */
+[data-theme='msx'] {
+  color-scheme: dark;
+  --bg-primary: #2438d8;
+  --bg-secondary: #1d2cb8;
+  --bg-tertiary: #2e46d8;
+  --bg-deep: #1827a5;
+  --bg-hover: #2c42cc;
+  --bg-active: #3a50e0;
+  --bg-hover-strong: #4a5ce0;
+  --border-color: #4a5ce0;
+  --border-strong: #6a7ae8;
+  --text-primary: #ffffff;
+  --text-secondary: #e0e8ff;
+  --text-tertiary: #a8b8f0;
+  --text-muted: #7f92cc;
+  --accent: #dff2e4;
+  --accent-hover: #c8e8d0;
+  --on-accent: #141f7a;
+  --accent-soft: #33408e;
+  --selected-bg: #3d50e8;
+  --error: #ff7a8a;
+  --error-hover: #ff8f9c;
+  --diff-added: #7ef0a8;
+  --diff-removed: #ff7a8a;
+  --overlay-bg: rgba(0, 0, 20, 0.5);
+  --shadow: rgba(0, 0, 30, 0.4);
+}
+
+/* Chaya: deep tea-field green with warm off-white text - new-leaf
+   keywords, jade functions, plum-blossom numbers */
+[data-theme='chaya'] {
+  color-scheme: dark;
+  --bg-primary: #11241b;
+  --bg-secondary: #0d1c15;
+  --bg-tertiary: #1c3527;
+  --bg-deep: #0a1812;
+  --bg-hover: #1a3226;
+  --bg-active: #24402f;
+  --bg-hover-strong: #2c4a38;
+  --border-color: #2c4a38;
+  --border-strong: #3d6048;
+  --text-primary: #e6ecdd;
+  --text-secondary: #cfd8c2;
+  --text-tertiary: #7a927f;
+  --text-muted: #5f7a68;
+  --accent: #e8c04a;
+  --accent-hover: #f0cd5e;
+  --on-accent: #1a2410;
+  --accent-soft: #313a20;
+  --selected-bg: #2c4a38;
+  --bubble-user: #f2b8c6;
+  --on-bubble-user: #55232e;
+  --bubble-ai: #1c3527;
+  --error: #d96a4e;
+  --error-hover: #e87a5e;
+  --diff-added: #6fa860;
+  --diff-removed: #c96a54;
+  --overlay-bg: rgba(0, 10, 5, 0.5);
+  --shadow: rgba(0, 8, 4, 0.4);
+}
+
+/* Coquette: pale blush with plum-chocolate text and satin-rose accents -
+   ribbons and lace, kept readable */
+[data-theme='coquette'] {
+  color-scheme: light;
+  --bg-primary: #fdf3f6;
+  --bg-secondary: #f8e4ec;
+  --bg-tertiary: #f2d4e0;
+  --bg-deep: #fff9fb;
+  --bg-hover: #f5dbe6;
+  --bg-active: #efcddd;
+  --bg-hover-strong: #e8bfd0;
+  --border-color: #e6c3d1;
+  --border-strong: #d4a0b5;
+  --text-primary: #5c3a45;
+  --text-secondary: #6e4a56;
+  --text-tertiary: #a07a88;
+  --text-muted: #b89aa4;
+  --accent: #d94f80;
+  --accent-hover: #c03a6a;
+  --accent-soft: #f8d8e6;
+  --selected-bg: #f2d4e0;
+  --error: #c22440;
+  --error-hover: #a01a33;
+  --diff-added: #4e8a55;
+  --diff-removed: #c92a45;
+  --overlay-bg: rgba(60, 20, 35, 0.4);
+  --shadow: rgba(80, 30, 50, 0.2);
+}
+
+/* Silver Screen: B&W-film achromatic palette - a mid-gray #555 screen
+   with ink/chalk luminance separation instead of hue. The only fully
+   hue-free theme; state colors stay desaturated but legible */
+[data-theme='silver'] {
+  color-scheme: dark;
+  --bg-primary: #555555;
+  --bg-secondary: #4a4a4a;
+  --bg-tertiary: #636363;
+  --bg-deep: #3b3b3b;
+  --bg-hover: #565656;
+  --bg-active: #5f5f5f;
+  --bg-hover-strong: #6c6c6c;
+  --border-color: #6e6e6e;
+  --border-strong: #8a8a8a;
+  --text-primary: #e6e6e6;
+  --text-secondary: #c8c8c8;
+  --text-tertiary: #9a9a9a;
+  --text-muted: #7f7f7f;
+  --accent: #f0f0f0;
+  --accent-hover: #ffffff;
+  --on-accent: #242424;
+  --accent-soft: #6a6a6a;
+  --selected-bg: #636363;
+  --bubble-user: #c6c6c6;
+  --on-bubble-user: #262626;
+  --bubble-user-border: #8a8a8a;
+  --bubble-ai: #242424;
+  --on-bubble-ai: #e6e6e6;
+  --bubble-ai-border: #b0b0b0;
+  --error: #c97a6a;
+  --error-hover: #d98a7a;
+  --diff-added: #8a9a7a;
+  --diff-removed: #b87a6a;
+  --overlay-bg: rgba(0, 0, 0, 0.5);
+  --shadow: rgba(0, 0, 0, 0.4);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--ui-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif);
+  font-size: var(--ui-font-size, 13px);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
