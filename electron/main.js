@@ -177,7 +177,6 @@ function buildMenu() {
       label: t('Window'),
       submenu: [
         { role: 'minimize', label: t('Minimize') },
-        { role: 'close', label: t('Close Window') },
       ],
     },
     {
