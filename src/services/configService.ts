@@ -100,8 +100,10 @@ class ConfigService {
     this.set('THEME', theme)
   }
 
+  // Noto Sans JP is the product default for Japanese UI text. A stored
+  // empty string means the user explicitly chose the system font.
   getUIFontFamily(): string | undefined {
-    return this.get('UI_FONT_FAMILY')
+    return this.get('UI_FONT_FAMILY') ?? 'Noto Sans JP'
   }
 
   setUIFontFamily(fontFamily: string): void {
@@ -203,11 +205,14 @@ class ConfigService {
     this.set('OLLAMA_MODEL', model)
   }
 
-  // CPU threads passed to Ollama as options.num_thread. Unset = let
-  // Ollama use every logical core (its default).
+  // CPU threads passed to Ollama as options.num_thread. Product default
+  // (unset) is logical processors - 1, leaving one core free so the PC
+  // stays responsive while a local model generates.
   getOllamaNumThread(): number | undefined {
     const value = parseInt(this.get('OLLAMA_NUM_THREAD') || '', 10)
-    return Number.isFinite(value) && value > 0 ? value : undefined
+    if (Number.isFinite(value) && value > 0) return value
+    const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : 0
+    return cores > 1 ? cores - 1 : undefined
   }
 
   setOllamaNumThread(threads: number | undefined): void {
@@ -218,13 +223,13 @@ class ConfigService {
     }
   }
 
-  // Context window passed to Ollama as options.num_ctx. Empty = Ollama's
-  // own default (4096), which is too small for agent loops: the system
-  // prompt + file reads + reasoning can exhaust it mid-generation and
-  // surface as an empty reply. 8192+ is recommended for agent use.
+  // Context window passed to Ollama as options.num_ctx. Product default
+  // (unset) is 8192: Ollama's own default (4096) is too small for agent
+  // loops - the system prompt + file reads + reasoning can exhaust it
+  // mid-generation and surface as an empty reply.
   getOllamaNumCtx(): number | undefined {
     const value = parseInt(this.get('OLLAMA_NUM_CTX') || '', 10)
-    return Number.isFinite(value) && value > 0 ? value : undefined
+    return Number.isFinite(value) && value > 0 ? value : 8192
   }
 
   setOllamaNumCtx(ctx: number | undefined): void {
@@ -235,13 +240,12 @@ class ConfigService {
     }
   }
 
-  // Sampling temperature passed to Ollama as options.temperature. Empty =
-  // the model's own default (typically 1.0-ish - measured as a source of
-  // language drift and hallucinated details in agent loops). The agent
-  // loop falls back to a low default when unset; see ollamaService.
+  // Sampling temperature passed to Ollama as options.temperature. Product
+  // default (unset) is 0.2 - measured runs showed the model-default ~1.0
+  // causes language drift and hallucinated details in agent loops.
   getOllamaTemperature(): number | undefined {
     const value = parseFloat(this.get('OLLAMA_TEMPERATURE') || '')
-    return Number.isFinite(value) && value >= 0 && value <= 2 ? value : undefined
+    return Number.isFinite(value) && value >= 0 && value <= 2 ? value : 0.2
   }
 
   setOllamaTemperature(temperature: number | undefined): void {
@@ -255,19 +259,24 @@ class ConfigService {
   // Thinking control for reasoning models (qwen3.5, gpt-oss, ...), sent
   // as the "think" field of /api/chat: boolean on/off, or an effort level
   // for models that accept one. gpt-oss cannot fully disable thinking -
-  // "low" is its minimum. undefined = let the model decide (most thinking
-  // models default to on).
+  // "low" is its minimum. Product default (unset) is "low": much faster
+  // replies on slow hardware. The stored value "default" explicitly means
+  // "let the model decide" (mapped to undefined here).
   getOllamaThink(): OllamaThink | undefined {
     const value = this.get('OLLAMA_THINK')
     if (value === '1') return true
     if (value === '0') return false
     if (value === 'low' || value === 'medium' || value === 'high') return value
-    return undefined
+    if (value === 'default') return undefined
+    return 'low'
   }
 
-  setOllamaThink(think: OllamaThink | undefined): void {
-    if (think === undefined) {
-      this.remove('OLLAMA_THINK', 'ollama_think')
+  // 'default' (or undefined) stores the explicit "model decides" sentinel
+  // so it stays distinguishable from "never configured" (= product
+  // default "low").
+  setOllamaThink(think: OllamaThink | 'default' | undefined): void {
+    if (think === undefined || think === 'default') {
+      this.set('OLLAMA_THINK', 'default')
     } else {
       this.set('OLLAMA_THINK', think === true ? '1' : think === false ? '0' : think)
     }

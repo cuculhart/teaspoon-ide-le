@@ -430,7 +430,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 max={maxThreads || undefined}
                 value={ollamaNumThread}
                 onChange={(e) => handleOllamaNumThreadChange(e.target.value)}
-                placeholder={maxThreads ? String(maxThreads) : ''}
+                placeholder={maxThreads > 1 ? String(maxThreads - 1) : ''}
                 className="font-size-field"
               />
               {maxThreads > 0 && (
@@ -438,7 +438,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
               )}
             </div>
             <p className="setting-description">
-              {t("Threads Ollama may use for inference. Empty = Ollama's own default (varies by version); a lower number keeps the PC responsive during generation.")}
+              {t("Threads Ollama may use for inference. Empty = default (logical processors - 1); a lower number keeps the PC responsive during generation.")}
             </p>
 
             <div className="appearance-row">
@@ -450,12 +450,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 step="1024"
                 value={ollamaNumCtx}
                 onChange={(e) => handleOllamaNumCtxChange(e.target.value)}
-                placeholder="4096"
+                placeholder="8192"
                 className="font-size-field"
               />
             </div>
             <p className="setting-description">
-              {t("Context window sent to Ollama as num_ctx. Empty = Ollama's default (4096), which agent loops can exhaust mid-reply and surface as an empty response - 8192 or more is recommended.")}
+              {t("Context window sent to Ollama as num_ctx. Empty = default 8192; smaller windows can be exhausted mid-reply by agent loops and surface as an empty response.")}
             </p>
 
             <div className="appearance-row">
@@ -468,11 +468,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 step="0.1"
                 value={ollamaTemperature}
                 onChange={(e) => handleOllamaTemperatureChange(e.target.value)}
+                placeholder="0.2"
                 className="font-size-field"
               />
             </div>
             <p className="setting-description">
-              {t('Sampling temperature sent to Ollama. Empty = model default (often ~1.0). Agent loops automatically use 0.2 when this is unset - measured runs showed the high default causes drift and hallucinated details. Lower = more deterministic.')}
+              {t('Sampling temperature sent to Ollama. Empty = default 0.2 - measured runs showed the model-default ~1.0 causes drift and hallucinated details in agent loops. Lower = more deterministic.')}
             </p>
 
             <div className="appearance-row">
@@ -492,7 +493,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
               </select>
             </div>
             <p className="setting-description">
-              {t('Force reasoning on/off, or pick an effort level, for models that support it (qwen3.5, gpt-oss, gemma4, ...). Off/Low = much faster replies on slow hardware. gpt-oss and gemma4 cannot fully disable thinking - use Low for them.')}
+              {t('Force reasoning on/off, or pick an effort level, for models that support it (qwen3.5, gpt-oss, gemma4, ...). Empty = default Low - much faster replies on slow hardware. gpt-oss and gemma4 cannot fully disable thinking - use Low for them.')}
             </p>
 
             <p className="setting-description">
