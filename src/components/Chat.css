@@ -605,3 +605,32 @@
   margin-top: 4px;
   color: var(--text-secondary);
 }
+
+.ollama-offline-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 15px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 0.9em;
+}
+
+.ollama-offline-notice span {
+  flex: 1;
+}
+
+.ollama-retry-button {
+  background: var(--bg-hover, var(--bg-active));
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-primary);
+  padding: 4px 12px;
+  cursor: pointer;
+  font-size: 0.9em;
+}
+
+.ollama-retry-button:hover {
+  border-color: var(--accent-color, var(--border-strong));
+}

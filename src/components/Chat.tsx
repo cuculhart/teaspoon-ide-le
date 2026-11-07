@@ -11,7 +11,7 @@ import CommandApproval from './CommandApproval'
 import CreateProjectModal from './CreateProjectModal'
 import { i18nService, useT } from '../services/i18nService'
 import { findFileCommands } from '../services/commandParser'
-import { OllamaEmptyResponseError } from '../services/ollamaService'
+import { OllamaEmptyResponseError, ollamaService } from '../services/ollamaService'
 import type { AgentAction } from '../types/agent'
 import { commandResultVerdict, formatStateDigest, TEST_COMMAND_RE } from '../services/toolFeedback'
 import { renderMarkdown, MARKDOWN_CSS } from '../utils/markdown'
@@ -970,6 +970,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   const [isLoading, setIsLoading] = useState(false)
   const [isConfigured, setIsConfigured] = useState(false)
   const [currentModel, setCurrentModel] = useState<string>('')
+  // null = not probed yet, true/false = Ollama reachability. Drives the
+  // friendly "start Ollama" notice instead of leaving users to read
+  // console network errors.
+  const [ollamaReachable, setOllamaReachable] = useState<boolean | null>(null)
   // Model pinned to the in-flight request (shown while generating)
   const [activeModel, setActiveModel] = useState<string>('')
   const [abortController, setAbortController] = useState<AbortController | null>(null)
@@ -1397,6 +1401,17 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     window.addEventListener('teaspoon:llm-changed', refreshLlm)
     return () => window.removeEventListener('teaspoon:llm-changed', refreshLlm)
   }, [])
+
+  // Probe Ollama on mount and whenever LLM settings change; the Retry
+  // button in the notice calls probeOllama directly.
+  const probeOllama = React.useCallback(async () => {
+    setOllamaReachable(await ollamaService.isReachable())
+  }, [])
+  useEffect(() => {
+    probeOllama()
+    window.addEventListener('teaspoon:llm-changed', probeOllama)
+    return () => window.removeEventListener('teaspoon:llm-changed', probeOllama)
+  }, [probeOllama])
 
   const handleSend = async () => {
     if (!input.trim()) return
@@ -2001,6 +2016,16 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           </div>
         )}
       </div>
+      {ollamaReachable === false && (
+        <div className="ollama-offline-notice">
+          <span>
+            {t('Ollama is not running. Start the Ollama app or run "ollama serve", then check again.')}
+          </span>
+          <button className="ollama-retry-button" onClick={probeOllama}>
+            {t('Retry')}
+          </button>
+        </div>
+      )}
       <div className="chat-input">
         <textarea
           value={input}

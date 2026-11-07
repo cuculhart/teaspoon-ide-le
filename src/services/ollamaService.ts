@@ -122,6 +122,20 @@ class OllamaService {
     return THINK_LEVELS_RE.test(model) ? think : think === 'low' ? false : true
   }
 
+  // Cheap reachability probe (/api/version) for UI notices - distinct
+  // from listModels, which returns [] both when Ollama is down AND when
+  // it is up with zero models installed.
+  async isReachable(): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.getBaseUrl()}/api/version`, {
+        signal: AbortSignal.timeout(3000),
+      })
+      return res.ok
+    } catch {
+      return false
+    }
+  }
+
   // Model names installed in Ollama (for the Settings dropdown)
   async listModels(): Promise<string[]> {
     try {

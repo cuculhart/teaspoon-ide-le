@@ -63,6 +63,13 @@ const ollamaReply = (text) =>
 // Install the intercepts on a page. Routes survive reloads, so this only
 // needs to run once per launch - before the first reload in launchApp.
 async function installOllamaMock(page) {
+  // Reachability probe used by the chat's offline notice.
+  await page.route('**/api/version', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ version: '0.0.0-e2e' }),
+    }))
   await page.route('**/api/tags', (route) =>
     route.fulfill({
       status: 200,
