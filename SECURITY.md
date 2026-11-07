@@ -12,7 +12,7 @@ Security fixes are applied to the latest release only.
 
 Please do **not** open a public issue for security vulnerabilities.
 
-- Preferred: use GitHub's [private vulnerability reporting](https://github.com/cuculhart/teaspoon-ide/security/advisories/new)
+- Preferred: use GitHub's [private vulnerability reporting](https://github.com/cuculhart/teaspoon-ide-le/security/advisories/new)
 - Alternative: email <contact@cuculhart.com>
 
 We aim to acknowledge reports within a few days. Thank you for helping keep

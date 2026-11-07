@@ -176,8 +176,8 @@ nvm install 22 && nvm use 22
 ### インストール
 
 ```bash
-git clone https://github.com/cuculhart/teaspoon-ide.git
-cd teaspoon-ide
+git clone https://github.com/cuculhart/teaspoon-ide-le.git
+cd teaspoon-ide-le
 
 # 依存関係のインストール
 npm install
