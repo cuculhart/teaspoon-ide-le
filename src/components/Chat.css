@@ -98,8 +98,7 @@
 }
 
 /* Mode switch (コード/相談): a segmented pill so the current mode is
-   visible at a glance. Agent mode lights up with the accent color;
-   ask mode stays a calm surface tone. */
+   visible at a glance - the selected side fills with the theme accent. */
 .chat-mode-switch {
   display: inline-flex;
   align-items: stretch;
@@ -129,15 +128,11 @@
   color: var(--text-primary);
 }
 
-.chat-mode-btn.mode-agent.active {
+/* Both modes use the theme's accent (submit) color when selected -
+   the filled side of the pill shows the active mode. */
+.chat-mode-btn.active {
   background: var(--accent);
   color: var(--on-accent);
-}
-
-.chat-mode-btn.mode-ask.active {
-  background: var(--bg-active);
-  color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
 .rollback-button {
