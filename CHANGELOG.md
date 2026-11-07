@@ -10,26 +10,50 @@ Teaspoon IDE Local Edition（Teaspoon LE）の変更履歴です。
 すべて取り込まれています**（Electron 44.10.0 / Node.js 24.22.1 など、
 teaspoon-ide v1.7.2 時点の最新のセキュリティ修正を含みます）。
 
-## [Unreleased]
+## [1.0.0] - 2026-11-06
+
+### Added
+
+- teaspoon-ide v1.7.2 から **Teaspoon IDE Local Edition**（Teaspoon LE）
+  としてフォーク。v1.0.0 から独立してバージョン管理。上流追従なし。
+- ローカル Ollama 単独バックエンド（`/api/chat`、`/api/tags`）。
+  モデル選択はローカルにインストール済みのモデルから行い、推奨モデルは
+  `gemma4:e4b`。CPU Threads、Context Size、Temperature、Thinking の
+  設定を維持。
+- 日本語 UI 辞書とプロンプト（lang/ja.json）、日本語のみの
+  メニュー／ダイアログ、日本語応答を要求するシステムプロンプト。
+- **相談モード（読み取り専用）**：ファイルの閲覧・検索のみを許可し、
+  WRITE_FILE / EDIT_FILE / RUN_COMMAND / CLOSE_PROJECT を実行層で
+  ブロック。コードレビューや問題点の指摘など、変更を伴わない相談に
+  使用。モードは入力欄の「コード / 相談」スイッチで切替（永続化）。
+- 相談モードで変更系コマンドがブロックされた際の
+  **「コードモードで再試行」ボタン**：ワンクリックでコードモードに
+  切替えて直前の依頼を自動再送。
+- Ollama 未起動時にチャット画面へ案内バー（起動方法と再確認ボタン）を
+  表示。
+- **リファレンスマニュアル**と**ハンズオンガイド**（`docs/`）。
+  Markdown 原稿から PDF を生成し、パッケージに同梱。ヘルプメニューの
+  「リファレンスマニュアル」「ハンズオンガイド」から既定の PDF
+  ビューアでオフライン表示できる。
+- マニュアルに Ollama の代替インストール方法（winget / Chocolatey /
+  Scoop / 公式 install.ps1）を記載。
+- アプリアイコンを Teaspoon LE 用のものに差し替え、favicon を追加。
+  readme に Teaspoon LE バナー画像を掲載。
 
 ### Changed
 
-- アプリアイコンを Teaspoon LE 用のものに差し替え、favicon を追加。
 - 設定の初期値を製品向けに調整（未設定時のみ適用、ユーザー設定は維持）:
   - フォント: Noto Sans JP
   - CPUスレッド数: 論理プロセッサ数 - 1
   - コンテキストサイズ: 8192
   - 温度: 0.2
   - 思考モード: 低
-- Ollama 未起動時にチャット画面へ案内バー（起動方法と再確認ボタン）を
-  表示するようにした。
-
-## [1.0.0] - 2026-11-06
-
-### Changed
-
-- teaspoon-ide v1.7.2 から **Teaspoon IDE Local Edition**（Teaspoon LE）
-  としてフォーク。v1.0.0 から独立してバージョン管理。上流追従なし。
+- テーマを System / Dark / Light / Organic Light / Heritage /
+  **古のコンソール** に縮小・差し替え。既定テーマは Light。
+  （Silver Screen は削除）
+- チャットモード切替 UI を入力欄の送信ボタン左に移動し、選択中の
+  モードをテーマのアクセントカラーで表示。
+- ウィンドウメニューから「閉じる」を削除（最小化のみ）。
 
 ### Removed
 
@@ -41,14 +65,3 @@ teaspoon-ide v1.7.2 時点の最新のセキュリティ修正を含みます）
   `http://localhost:11434` に固定。
 - UI言語選択と英語辞書。製品は日本語のみで、エージェントプロンプトも
   日本語応答を指示。
-- テーマを System / Dark / Light / Organic Light / Heritage /
-  Silver Screen に縮小。既定テーマは Light。
-
-### Added
-
-- ローカル Ollama 単独バックエンド（`/api/chat`、`/api/tags`）。
-  モデル選択はローカルにインストール済みのモデルから行い、既定は
-  `gemma4:e4b`。CPU Threads、Context Size、Temperature、Thinking の
-  設定を維持。
-- 日本語 UI 辞書とプロンプト（lang/ja.json）、日本語のみの
-  メニュー／ダイアログ、日本語応答を要求するシステムプロンプト。
