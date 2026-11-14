@@ -10,6 +10,15 @@ Teaspoon IDE Local Edition（Teaspoon LE）の変更履歴です。
 すべて取り込まれています**（Electron 44.10.0 / Node.js 24.22.1 など、
 teaspoon-ide v1.7.2 時点の最新のセキュリティ修正を含みます）。
 
+## [Unreleased]
+
+### Security
+
+- ビルドツールチェーンの推移的依存を更新し、minimatch / glob の
+  DoS アドバイザリ（GHSA-g3hv-75wg-m249、GHSA-3g3m-2fjr-6pw4）を
+  解消（`@electron/asar` 4.3.1→4.3.2、`glob` 13.0.6→14.0.6、
+  `minimatch` 10.2.6→11.0.8）。アプリ本体のコード変更なし。
+
 ## [1.0.0] - 2026-11-06
 
 ### Added
