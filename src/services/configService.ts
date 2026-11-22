@@ -233,13 +233,24 @@ class ConfigService {
     }
   }
 
+  // Session-only num_ctx override, set by the "context full - raise it
+  // and retry" action. In-memory on purpose: a context window that
+  // outlives the machine's memory budget should be a deliberate
+  // Settings change, not a side effect of an error-recovery click.
+  private sessionNumCtx: number | undefined
+
   // Context window passed to Ollama as options.num_ctx. Product default
   // (unset) is 8192: Ollama's own default (4096) is too small for agent
   // loops - the system prompt + file reads + reasoning can exhaust it
   // mid-generation and surface as an empty reply.
   getOllamaNumCtx(): number | undefined {
+    if (this.sessionNumCtx) return this.sessionNumCtx
     const value = parseInt(this.get('OLLAMA_NUM_CTX') || '', 10)
     return Number.isFinite(value) && value > 0 ? value : 8192
+  }
+
+  setSessionOllamaNumCtx(ctx: number): void {
+    if (ctx > 0) this.sessionNumCtx = ctx
   }
 
   setOllamaNumCtx(ctx: number | undefined): void {

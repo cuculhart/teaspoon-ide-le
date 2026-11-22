@@ -26,7 +26,7 @@ interface Message {
   // Model that produced this response (e.g. "ollama:qwen3.5:4b")
   model?: string
   // Token counts reported by the provider for this response
-  tokens?: { input?: number; output?: number }
+  tokens?: { input?: number; output?: number; cached?: number; doneReason?: string }
   // The model's raw output, before command blocks were replaced with
   // readable notes. Sent back as history so the model never sees the
   // "Ran: ..." note format (small models imitate it and emit fake notes).
@@ -38,6 +38,13 @@ interface Message {
   // Set when ask mode blocked a mutating command during this run - the
   // last reply offers a one-click switch to code mode and resend.
   canRetryInCodeMode?: boolean
+  // Set on a context-saturated empty-reply error - the value is the
+  // session-only num_ctx the one-click recovery button would apply.
+  canRaiseNumCtx?: number
+  // UI-only turn (request failure, client-side warning). It is shown to
+  // the user but must never be sent back to the model - as a `model`
+  // role entry it would look like the AI said the error text itself.
+  isError?: boolean
 }
 
 const formatLatency = (ms: number) => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`)
@@ -50,6 +57,16 @@ const stripNoteLines = (text: string) =>
     .filter((l) => !/^\s*(▶️|⚠️|📖|🔍|⏭️|↩️|✅)/u.test(l))
     .join('\n')
 
+// Turns that must stay out of model-bound history. `isError` marks
+// them going forward; the heuristic catches legacy histories saved
+// before the flag existed - an assistant bubble that is only an
+// "Error: ..."/"エラー: ..." line, with no raw output or actions, is a
+// failure bubble rather than a real model reply.
+const isErrorMessage = (m: Message) =>
+  m.isError === true ||
+  (m.role === 'assistant' && !m.rawContent && !m.actions?.length &&
+    /^(Error|エラー):\s/.test(m.content.trim()))
+
 // Step-card row icon: the action kind for successes, the outcome for
 // failures/rejections (mirrors the emoji vocabulary of the note lines).
 const ACTION_ICON: Record<AgentAction['kind'], string> = {
@@ -57,7 +74,33 @@ const ACTION_ICON: Record<AgentAction['kind'], string> = {
   write: '✏️', edit: '✏️', run: '▶️', close: '🚪', notice: '⚠️',
 }
 const actionIcon = (a: AgentAction) =>
-  a.status === 'rejected' ? '⏭️' : a.status === 'failed' ? '⚠️' : ACTION_ICON[a.kind]
+  a.status === 'rejected' ? '⏭️' : a.status === 'failed' ? '⚠️' : a.status === 'pending' ? '⏳' : ACTION_ICON[a.kind]
+
+// File bodies the model emitted sit in model-bound history as dead
+// weight: once written they are on disk and re-readable, but each
+// full block still consumes the context budget on EVERY later call -
+// this is the dominant accumulator that pushes long implementation
+// runs into num_ctx saturation (which then surfaces as truncated or
+// empty replies). Reduce older blocks to their marker lines so the
+// model keeps the record of WHAT it did; the freshest assistant reply
+// stays intact so "continue where you stopped" still matches it.
+const elideFileBlocks = (text: string) => {
+  let out = text.replace(
+    /((?:\/\/|:::)[ \t]*(?:WRITE_FILE|EDIT_FILE)[ \t]*:[^\n]*\n)[\s\S]*?((?:\/\/|:::)[ \t]*END_(?:WRITE_FILE|EDIT_FILE))/g,
+    (_m, open, close) => `${open}(content omitted - on disk, emit READ_FILE to view)\n${close}`,
+  )
+  // A truncated reply leaves an opener whose body runs to the end of
+  // the message - same dead weight. Elide it only when no complete END
+  // marker follows, so a later intact block is never eaten.
+  const tailOpen = /(?:\/\/|:::)[ \t]*(?:WRITE_FILE|EDIT_FILE)[ \t]*:[^\n]*\n/g
+  let last: RegExpExecArray | null = null
+  let m: RegExpExecArray | null
+  while ((m = tailOpen.exec(out)) !== null) last = m
+  if (last && !/(?:\/\/|:::)[ \t]*END_(?:WRITE_FILE|EDIT_FILE)/.test(out.slice(last.index + last[0].length))) {
+    out = out.slice(0, last.index + last[0].length) + '(partial block omitted - the reply was cut off)'
+  }
+  return out
+}
 
 // Recent messages sent to the model verbatim; older turns are folded
 // into the rolling contextSummary instead, keeping model input bounded.
@@ -216,12 +259,14 @@ function parseEditBlocks(body: string): EditBlock[] {
 function applyEditBlocks(
   content: string,
   blocks: EditBlock[]
-): { content?: string; error?: string } {
+): { content?: string; error?: string; alreadyApplied?: boolean } {
   if (blocks.length === 0) {
     return { error: 'no SEARCH/REPLACE blocks found' }
   }
   const fileEol = content.includes('\r\n') ? '\r\n' : '\n'
   let out = content
+  let changed = false
+  let sawAlreadyApplied = false
   for (let i = 0; i < blocks.length; i++) {
     let search = blocks[i].search
     let replace = blocks[i].replace
@@ -232,14 +277,101 @@ function applyEditBlocks(
       idx = out.indexOf(search)
     }
     if (idx === -1) {
+      // Idempotent re-emit: models repeat an edit whose result is already
+      // on disk (e.g. the same SEARCH/REPLACE sent again after a
+      // successful apply). A replacement that appears exactly once means
+      // the block's desired end-state holds - count it as applied rather
+      // than failing the batch.
+      const repIdx = replace.length > 0 ? out.indexOf(replace) : -1
+      if (repIdx !== -1 && out.indexOf(replace, repIdx + 1) === -1) {
+        sawAlreadyApplied = true
+        continue
+      }
       return { error: `SEARCH block #${i + 1} not found in the file (re-read the file and retry)` }
     }
     if (out.indexOf(search, idx + 1) !== -1) {
       return { error: `SEARCH block #${i + 1} matches multiple locations - include more surrounding context` }
     }
     out = out.slice(0, idx) + replace + out.slice(idx + search.length)
+    changed = true
   }
-  return { content: out }
+  return { content: out, alreadyApplied: sawAlreadyApplied && !changed }
+}
+
+// A write/edit result that shrinks an existing file drastically is
+// almost always a fragment - the model emitted only the first part of
+// the file ("initialization for now") and WRITE_FILE would silently
+// destroy the rest. Small files are exempt (a 10-line file rewritten
+// as 4 lines is a normal refactor); emptying a non-empty file is not.
+function looksLikeFragment(oldContent: string, newContent: string): boolean {
+  if (oldContent.trim() === '') return false
+  if (newContent.trim() === '') return true
+  const oldLines = oldContent.split('\n').length
+  return oldLines >= 20 && newContent.split('\n').length * 2 < oldLines
+}
+
+// Identifiers the scanner must never flag: language keywords and the
+// calls a script can always make without a project-local definition.
+const JS_NO_CALL = new Set([
+  'if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'do',
+  'else', 'typeof', 'new', 'delete', 'void', 'in', 'of', 'instanceof',
+  'await', 'yield', 'with', 'case', 'throw', 'super', 'this', 'async',
+  'constructor', 'import', 'export', 'try', 'finally', 'class', 'extends',
+  'const', 'let', 'var', 'static', 'get', 'set', 'default',
+])
+const JS_GLOBAL_CALLS = new Set([
+  'alert', 'confirm', 'prompt', 'require', 'eval',
+  'setInterval', 'setTimeout', 'clearInterval', 'clearTimeout',
+  'setImmediate', 'clearImmediate', 'queueMicrotask',
+  'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback',
+  'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+  'Number', 'String', 'Boolean', 'BigInt', 'Symbol',
+  'Array', 'Object', 'Date', 'Promise', 'Error', 'TypeError',
+  'RangeError', 'SyntaxError', 'ReferenceError', 'URIError',
+  'RegExp', 'Map', 'Set', 'WeakMap', 'WeakSet', 'Proxy',
+  'Intl', 'fetch', 'atob', 'btoa',
+  'encodeURI', 'encodeURIComponent', 'decodeURI', 'decodeURIComponent',
+  'escape', 'unescape', 'structuredClone',
+  'addEventListener', 'removeEventListener', 'dispatchEvent',
+  'getComputedStyle', 'matchMedia', 'open', 'close', 'print',
+  'focus', 'blur', 'scrollTo', 'scrollBy', 'postMessage',
+  'Worker', 'Blob', 'URL', 'FormData', 'AbortController',
+  'TextEncoder', 'TextDecoder', 'URLSearchParams', 'FileReader',
+])
+
+// A call to a function that is defined nowhere is the residue of a
+// partial write - the model declares "implemented isStoneValid" while
+// only the call site ever reached the disk. Scan the new content for
+// bare calls whose name has no definition in the same content; a
+// project-wide grep afterwards decides whether the definition lives
+// elsewhere. Advisory only - heuristics, not a compiler.
+function findUndefinedCallees(content: string): string[] {
+  // Strip comments so prose like "// call isStoneValid here" cannot
+  // register a phantom call site.
+  const stripped = content
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+  const defs = new Set<string>()
+  const addAll = (re: RegExp, gi = 1) => {
+    for (const m of stripped.matchAll(re)) defs.add(m[gi])
+  }
+  // function f / class F / const|let|var f / f: / f = / f() { method shorthand / f =>
+  addAll(/\b(?:function\s*\*?\s*|class\s+|const\s+|let\s+|var\s+)([A-Za-z_$][\w$]*)/g)
+  addAll(/\b([A-Za-z_$][\w$]*)\s*[:=]/g)
+  addAll(/\b([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g)
+  // Any identifier on an import line counts as defined (import {a, b}).
+  for (const m of stripped.matchAll(/^[^\n]*\bimport\b[^\n]*$/gm)) {
+    for (const w of m[0].matchAll(/\b[A-Za-z_$][\w$]*\b/g)) defs.add(w[0])
+  }
+  const suspects = new Set<string>()
+  for (const m of stripped.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = m[1]
+    if (defs.has(name) || JS_NO_CALL.has(name) || JS_GLOBAL_CALLS.has(name)) continue
+    // PascalCase reads as a constructor/class, not a project helper.
+    if (!/^[a-z]/.test(name)) continue
+    suspects.add(name)
+  }
+  return [...suspects].slice(0, 5)
 }
 
 // Parse and execute file commands from AI response.
@@ -280,10 +412,29 @@ async function parseAndExecuteFileCommands(
     // model has read and files it has successfully changed.
     readFiles?: Set<string>
     modifiedFiles?: Set<string>
+    // The "code shown but not written" nudge fires at most once per run.
+    codeShownNudged?: boolean
+    // The previous model reply was cut off by the token/context limit
+    // (Ollama done_reason 'length'). The malformed-block feedback then
+    // tells the model to emit LESS, not to repeat the oversized block.
+    lastTurnTruncated?: boolean
+    // Paths whose earlier READ_FILE result was elided from model-bound
+    // history under context pressure. A re-read of an elided path must
+    // return the full content - the "unchanged" short-circuit would
+    // otherwise answer "use what you have" when the model has nothing.
+    elidedReads?: Set<string>
+    // Paths whose suspicious-shrink write/edit was already blocked once.
+    // A repeat after the warning counts as an intentional full rewrite
+    // and is let through - otherwise legitimate rewrites could never
+    // shrink a file.
+    shrinkWarned?: Set<string>
   },
   // Ask (read-only) mode: WRITE_FILE/EDIT_FILE/RUN_COMMAND/CLOSE_PROJECT
   // are blocked before any approval prompt or disk/shell access.
-  readOnly?: boolean
+  readOnly?: boolean,
+  // Called each time an action lands so the step card grows live instead
+  // of appearing only after every command in the step has finished.
+  onAction?: (actions: AgentAction[]) => void
 ): Promise<CommandExecutionResult> {
   const { commands, docSpans } = findFileCommands(response)
 
@@ -349,6 +500,30 @@ async function parseAndExecuteFileCommands(
         && !name.startsWith('END_'))
   )]
 
+  // Truncated command names: a cut-off "// READ" or "// WRITE: x" is a
+  // proper prefix of READ_FILE/WRITE_FILE, and "READFILE" is the same
+  // name with the underscore dropped. The invented scan above ignores
+  // names without "_" or "." (so plain "// TODO" comments stay inert),
+  // which lets these pass as prose while the model waits for a result
+  // that never comes. Flag them only when the rest of the line is empty
+  // or a single token - "// WRITE your code here" stays text.
+  const KNOWN_SQUASHED = new Set([...KNOWN_COMMAND_NAMES].map(k => k.replace(/_/g, '')))
+  const truncatedCmds = new Set<string>()
+  for (const m of scanText.matchAll(/^(?:\/\/|:::)[ \t]*([A-Z][A-Z0-9]*)[ \t]*:?[ \t]*(\S[^\n]*)?$/gm)) {
+    const name = m[1]
+    const rest = (m[2] ?? '').trim()
+    if (KNOWN_COMMAND_NAMES.has(name) || name.startsWith('END_')) continue
+    // The name regex stops at "_", so "END_WRITE_FILE" reads as
+    // name=END, rest=_WRITE_FILE. Underscored tokens are the invented
+    // scan's job (or a parsed terminator) - leave them alone.
+    if (rest.startsWith('_')) continue
+    const isVariant = KNOWN_SQUASHED.has(name)
+      || [...KNOWN_COMMAND_NAMES].some(k => k.startsWith(name))
+    if (!isVariant || /\s/.test(rest)) continue
+    truncatedCmds.add(name)
+  }
+  if (truncatedCmds.size > 0) inventedCmds.push(...truncatedCmds)
+
   // Two more small-model failure modes worth retrying instead of showing raw:
   // (a) the model echoes the app's own "Command execution results:" wrapper
   //     as if it were the app, and
@@ -366,12 +541,38 @@ async function parseAndExecuteFileCommands(
   const JA_DEFERRAL =
     /(?:次の応答|次回の応答|次のメッセージ|続きを|続けて|残りの).{0,60}?(?:お知らせください|教えてください|言ってください|進めてください)|(?:進めてください|続けてください|続きをどうぞ)/u
   const EN_DEFERRAL =
-    /\b(?:in the next (?:response|message|turn)|next response|say (?:the word )?["']?continue["']?|shall I (?:continue|proceed)|to (?:continue|proceed)[,.]? (?:just )?(?:let me know|say)|let me know.{0,40}(?:continue|proceed|go ahead))/i
+    /\b(?:in the next (?:response|message|turn)|next response|say (?:the word )?["']?continue["']?|shall (?:I|we) (?:continue|proceed|implement|create|write|add|start)|to (?:continue|proceed)[,.]? (?:just )?(?:let me know|say)|let me know.{0,40}(?:continue|proceed|go ahead))/i
+  // Polite work-offer endings defer the same way: "〜を作成します。
+  // よろしいでしょうか？" or "〜に取り掛かりましょうか？" announce the next
+  // unit of work and wait for a confirmation the loop does not need.
+  // Small local models emit one file per turn and stop this way.
+  const JA_WORK_OFFER =
+    /(?:取り掛か|取りかか|着手|開始|作成|作り|書き|実装|記述|実行|進め|続け|修正|変更|追加|対応|仕上げ|確認|実施|始め)(?:り|し)?ましょうか/u
+  const JA_ANNOUNCE_THEN_ASK =
+    /(?:取り掛か|取りかか|着手|作成|作製|実装|記述|実行|進め|続け|修正|変更|追加|対応|仕上げ|確認|実施)(?:り|し|いたし)?ます[^。]{0,30}。\s*(?:よろしい|いかが|よい|いい|大丈夫)でしょうか/u
+  // Declarative next-work endings defer the same way without asking:
+  // "次に script.js を実装します" / "次はフェーズ2に進めます" announce
+  // unfinished work then stop. The 次/今後/残り marker plus a work verb
+  // in declarative (non-question) form is the signal - past tense and
+  // user-instructions ("〜してください") are excluded by the endings.
+  const JA_NEXT_WORK =
+    /(?:次[にのは、\s]|今後|残り|以降)[^。！？\n]{0,60}(?:実装|進め|進み|着手|取り掛か|取りかか|作成|作製|作り|開発|継続|対応|修正|追加|実施|確認|説明)(?:り|し|ていき|る|ましょ|ま)?(?:ます|す|ましょう|う|です|でしょう|予定|べき)/u
+  const EN_NEXT_WORK =
+    /\b(?:next,?|then,?|I(?:'ll| will| shall) (?:now )?|let me (?:now )?|we(?:'ll| will) (?:now )?)\s*(?:implement|proceed|continue|create|write|add|start|build|move on|work on)/i
   const deferred = JA_DEFERRAL.test(scanText) || EN_DEFERRAL.test(scanText)
+    || JA_WORK_OFFER.test(scanText) || JA_ANNOUNCE_THEN_ASK.test(scanText)
+    || JA_NEXT_WORK.test(scanText) || EN_NEXT_WORK.test(scanText)
+  // "how is X created" / "where is X written" are questions, not
+  // file-creation requests - a fenced snippet there is an explanation.
+  // Missing a real nudge is cheap; a false one burns a paid turn.
   const creationIntent = /(作成|作って|作る|生成|実装|create|write|generate|make|build)/i.test(userText)
+    && !/(方法|作り方|作りかた|やり方|手順|書き方|教えて|書かれ|記載さ|記述さ|どうやって|どうすれば|how to|how do|how can|what is|where is)/i.test(userText)
+  // A model that still shows a fence after being told is displaying it on
+  // purpose (e.g. a shell example) - re-nudging wastes a step.
+  const codeShownNudge = commands.length === 0 && creationIntent && hasFence && !readOnly && !state?.codeShownNudged
 
   if (commands.length === 0 && malformedBlocks.length === 0 && inventedCmds.length === 0
-    && !echoingResults && !deferred && !(creationIntent && hasFence && !readOnly)) {
+    && !echoingResults && !deferred && !codeShownNudge) {
     return { display: response, feedback: [], needsContinuation: false }
   }
   if (!window.electronAPI) {
@@ -384,6 +585,10 @@ async function parseAndExecuteFileCommands(
   // in the order it actually ran (writes run after reads regardless of
   // their position in the model's text).
   const actions: AgentAction[] = []
+  const pushAction = (a: AgentAction) => {
+    actions.push(a)
+    onAction?.(actions)
+  }
   const checkpoint: { path: string; prevContent: string; existed: boolean }[] = []
   let needsContinuation = false
 
@@ -405,9 +610,14 @@ async function parseAndExecuteFileCommands(
       `Malformed command block(s): ${[...new Set(malformedBlocks)].join(', ')}. ` +
       'A WRITE_FILE block must end with "// END_WRITE_FILE" and an EDIT_FILE block with "// END_EDIT_FILE". ' +
       'Emit the complete block again with the correct terminator - do not omit any part of the file.' +
+      // A token-limit cut means the SAME resend truncates again - the
+      // model must shrink this turn's output, not repeat the block.
+      (state?.lastTurnTruncated
+        ? ' Your reply hit the output token limit - keep this turn SHORT: minimal prose, and emit file content in small pieces (a few EDIT_FILE blocks at a time, or WRITE_FILE a first part then append with EDIT_FILE).'
+        : '') +
       (malformedDetails.length ? `\n${malformedDetails.join('\n')}` : '')
     )
-    actions.push({ kind: 'notice', label: i18nService.t('Incomplete command block - asking the model to retry'), target: '', status: 'failed' })
+    pushAction({ kind: 'notice', label: i18nService.t('Incomplete command block - asking the model to retry'), target: '', status: 'failed' })
     needsContinuation = true
   }
   if (inventedCmds.length > 0) {
@@ -417,7 +627,7 @@ async function parseAndExecuteFileCommands(
       '(WRITE_FILE/EDIT_FILE blocks close with "// END_WRITE_FILE" / "// END_EDIT_FILE"). ' +
       'To create a file, emit "// WRITE_FILE: <file_path>", the content, then "// END_WRITE_FILE".'
     )
-    actions.push({ kind: 'notice', label: i18nService.t('Unknown command - asking the model to retry'), target: inventedCmds.map(c => `// ${c}`).join(', '), status: 'failed' })
+    pushAction({ kind: 'notice', label: i18nService.t('Unknown command - asking the model to retry'), target: inventedCmds.map(c => `// ${c}`).join(', '), status: 'failed' })
     needsContinuation = true
   }
   if (echoingResults) {
@@ -425,7 +635,7 @@ async function parseAndExecuteFileCommands(
       'The "Command execution results:" block is generated by the app, not by you - do not repeat it. ' +
       'Respond as the assistant: emit the corrected file command or answer the user.'
     )
-    actions.push({ kind: 'notice', label: i18nService.t('Result block imitated - asking the model to retry'), target: '', status: 'failed' })
+    pushAction({ kind: 'notice', label: i18nService.t('Result block imitated - asking the model to retry'), target: '', status: 'failed' })
     needsContinuation = true
   }
   if (deferred) {
@@ -433,16 +643,34 @@ async function parseAndExecuteFileCommands(
       'You ended your turn asking the user to say "continue" (or similar) before emitting the rest of the work. ' +
       'Do not wait for the user - continue NOW in this response and emit the remaining file commands or output you listed.'
     )
-    actions.push({ kind: 'notice', label: i18nService.t('Deferred to a later response - asking the model to continue now'), target: '', status: 'failed' })
+    pushAction({ kind: 'notice', label: i18nService.t('Deferred to a later response - asking the model to continue now'), target: '', status: 'failed' })
     needsContinuation = true
   }
-  if (commands.length === 0 && creationIntent && hasFence && !readOnly) {
+  if (codeShownNudge) {
     feedback.push(
       'You showed code inside a markdown code fence - fenced lines are shown to the user as text and never executed, so nothing was written to disk. ' +
       'Emit the command OUTSIDE any code fence: "// WRITE_FILE: <file_path>", the content, then "// END_WRITE_FILE".'
     )
-    actions.push({ kind: 'notice', label: i18nService.t('Code shown but not written - asking the model to retry'), target: '', status: 'failed' })
+    pushAction({ kind: 'notice', label: i18nService.t('Code shown but not written - asking the model to retry'), target: '', status: 'failed' })
+    if (state) state.codeShownNudged = true
     needsContinuation = true
+  }
+  // A block can be syntactically valid yet still burn most of the
+  // output budget - giant write/edit bodies are exactly what gets
+  // truncated next turn. The command is executed as-is; the advisory
+  // only steers the model to split the NEXT one.
+  const hugeCmd = commands.find(c =>
+    (c.type === 'write' || c.type === 'edit')
+    && (c.body?.split('\n').length ?? 0) >= 80)
+  if (hugeCmd) {
+    const name = hugeCmd.type === 'write' ? 'WRITE_FILE' : 'EDIT_FILE'
+    feedback.push(
+      `${name} ${hugeCmd.arg}: that block was ~${hugeCmd.body!.split('\n').length} lines long. ` +
+      `Large blocks risk being cut off by the output limit before they finish - ` +
+      `next time split the work into smaller pieces ` +
+      `(several small SEARCH/REPLACE pairs, or a short WRITE_FILE part appended with EDIT_FILE).`
+    )
+    pushAction({ kind: 'notice', label: i18nService.t('Large block - asking the model to split future work'), target: hugeCmd.arg, status: 'ok' })
   }
   const pendingWrites: { index: number; path: string; arg: string; body: string }[] = []
   const pendingEdits: { index: number; path: string; arg: string; body: string }[] = []
@@ -460,7 +688,7 @@ async function parseAndExecuteFileCommands(
         : cmd.type === 'edit' ? 'EDIT_FILE'
         : cmd.type === 'run' ? 'RUN_COMMAND' : 'CLOSE_PROJECT'
       notes[i] = `🚫 ${i18nService.t('Blocked (ask mode)')}: ${name}`
-      actions.push({ kind: 'notice', label: i18nService.t('Blocked (ask mode)'), target: `${name} ${cmd.arg}`.trim(), status: 'failed' })
+      pushAction({ kind: 'notice', label: i18nService.t('Blocked (ask mode)'), target: `${name} ${cmd.arg}`.trim(), status: 'failed' })
       feedback.push(
         `${name} ${cmd.arg}: blocked - ask (read-only) mode is active. ` +
         'WRITE_FILE, EDIT_FILE, RUN_COMMAND, and CLOSE_PROJECT are disabled. ' +
@@ -477,7 +705,7 @@ async function parseAndExecuteFileCommands(
     if (cmd.type === 'write') {
       if (resolved.error || !resolved.path) {
         notes[i] = `⚠️ ${i18nService.t('Rejected write to')} ${cmd.arg}: ${resolved.error}`
-        actions.push({ kind: 'write', label: i18nService.t('Rejected write to'), target: cmd.arg, status: 'failed', detail: resolved.error })
+        pushAction({ kind: 'write', label: i18nService.t('Rejected write to'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`WRITE_FILE ${cmd.arg}: rejected - ${resolved.error}`)
         needsContinuation = true
       } else {
@@ -486,7 +714,7 @@ async function parseAndExecuteFileCommands(
         if (strayDir) {
           const base = rel.split('/').pop() ?? cmd.arg
           notes[i] = `⚠️ ${i18nService.t('Rejected write to')} ${cmd.arg}: ${i18nService.t('subdirectory was not requested')}`
-          actions.push({ kind: 'write', label: i18nService.t('Rejected write to'), target: cmd.arg, status: 'failed', detail: i18nService.t('subdirectory was not requested') })
+          pushAction({ kind: 'write', label: i18nService.t('Rejected write to'), target: cmd.arg, status: 'failed', detail: i18nService.t('subdirectory was not requested') })
           feedback.push(
             `WRITE_FILE ${cmd.arg}: rejected - the user asked for "${base}" with no directory; ` +
             `"${strayDir}/" was never requested. Emit "// WRITE_FILE: ${base}" to write it at the project root instead.`
@@ -499,7 +727,7 @@ async function parseAndExecuteFileCommands(
     } else if (cmd.type === 'edit') {
       if (resolved.error || !resolved.path) {
         notes[i] = `⚠️ ${i18nService.t('Rejected edit to')} ${cmd.arg}: ${resolved.error}`
-        actions.push({ kind: 'edit', label: i18nService.t('Rejected edit to'), target: cmd.arg, status: 'failed', detail: resolved.error })
+        pushAction({ kind: 'edit', label: i18nService.t('Rejected edit to'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`EDIT_FILE ${cmd.arg}: rejected - ${resolved.error}`)
         needsContinuation = true
       } else {
@@ -509,7 +737,7 @@ async function parseAndExecuteFileCommands(
       const project = projectService.getCurrentProject()
       if (!project?.isOpen) {
         notes[i] = `⚠️ ${i18nService.t('No project is open; cannot run commands.')}`
-        actions.push({ kind: 'run', label: i18nService.t('Ran'), target: cmd.arg, status: 'failed', detail: i18nService.t('no project open') })
+        pushAction({ kind: 'run', label: i18nService.t('Ran'), target: cmd.arg, status: 'failed', detail: i18nService.t('no project open') })
         feedback.push(`RUN_COMMAND ${cmd.arg}: failed - no project open`)
         needsContinuation = true
       } else {
@@ -520,7 +748,7 @@ async function parseAndExecuteFileCommands(
       const project = projectService.getCurrentProject()
       if (!project?.isOpen) {
         notes[i] = `⚠️ ${i18nService.t('No project is open; cannot close.')}`
-        actions.push({ kind: 'close', label: i18nService.t('Close Project'), target: '', status: 'failed', detail: i18nService.t('no project open') })
+        pushAction({ kind: 'close', label: i18nService.t('Close Project'), target: '', status: 'failed', detail: i18nService.t('no project open') })
         feedback.push('CLOSE_PROJECT: failed - no project open')
       } else {
         // Same cleanup as File > Close Project, but without the
@@ -535,7 +763,7 @@ async function parseAndExecuteFileCommands(
         configService.setLastOpenFile('')
         window.dispatchEvent(new CustomEvent('teaspoon:project-opened', { detail: { rootPath: null } }))
         notes[i] = `✅ ${i18nService.t('Closed project')}`
-        actions.push({ kind: 'close', label: i18nService.t('Closed project'), target: '', status: 'ok' })
+        pushAction({ kind: 'close', label: i18nService.t('Closed project'), target: '', status: 'ok' })
         feedback.push('CLOSE_PROJECT: the project is now closed. Any further file commands will fail - finish your answer.')
       }
     } else if (cmd.type === 'grep' || cmd.type === 'find') {
@@ -544,7 +772,7 @@ async function parseAndExecuteFileCommands(
       const project = projectService.getCurrentProject()
       if (!project?.isOpen) {
         notes[i] = `⚠️ ${i18nService.t('No project is open; cannot search.')}`
-        actions.push({ kind: cmd.type === 'grep' ? 'grep' : 'find', label: cmd.type === 'grep' ? i18nService.t('Searched') : i18nService.t('Found'), target: `"${cmd.arg}"`, status: 'failed', detail: i18nService.t('no project open') })
+        pushAction({ kind: cmd.type === 'grep' ? 'grep' : 'find', label: cmd.type === 'grep' ? i18nService.t('Searched') : i18nService.t('Found'), target: `"${cmd.arg}"`, status: 'failed', detail: i18nService.t('no project open') })
         feedback.push(`${cmd.type === 'grep' ? 'GREP' : 'FIND_FILES'} ${cmd.arg}: failed - no project open`)
         continue
       }
@@ -553,30 +781,30 @@ async function parseAndExecuteFileCommands(
           const result = await window.electronAPI.searchFiles(project.rootPath, cmd.arg)
           if (result.success && result.matches) {
             notes[i] = `🔍 ${i18nService.t('Searched')} "${cmd.arg}": ${result.matches.length} ${i18nService.t('match(es)')}`
-            actions.push({ kind: 'grep', label: i18nService.t('Searched'), target: `"${cmd.arg}"`, status: 'ok', detail: `${result.matches.length} ${i18nService.t('match(es)')}` })
+            pushAction({ kind: 'grep', label: i18nService.t('Searched'), target: `"${cmd.arg}"`, status: 'ok', detail: `${result.matches.length} ${i18nService.t('match(es)')}` })
             const body = result.matches.map(m => `${m.file}:${m.line}: ${m.text}`).join('\n')
             feedback.push(`GREP ${cmd.arg} result (${result.matches.length} matches${result.truncated ? ', truncated' : ''}):\n${body || '(no matches)'}` +
               (result.matches.length === 0 ? '\nHint: nothing matched. The pattern may be too specific - try a single word, or READ_FILE the file you expect it in.' : ''))
           } else {
             notes[i] = `⚠️ ${i18nService.t('Search failed for')} "${cmd.arg}": ${result.error}`
-            actions.push({ kind: 'grep', label: i18nService.t('Searched'), target: `"${cmd.arg}"`, status: 'failed', detail: `${result.error}` })
+            pushAction({ kind: 'grep', label: i18nService.t('Searched'), target: `"${cmd.arg}"`, status: 'failed', detail: `${result.error}` })
             feedback.push(`GREP ${cmd.arg}: failed - ${result.error}`)
           }
         } else {
           const result = await window.electronAPI.findFiles(project.rootPath, cmd.arg)
           if (result.success && result.files) {
             notes[i] = `🔍 ${i18nService.t('Found')} ${result.files.length} ${i18nService.t('file(s) matching')} "${cmd.arg}"`
-            actions.push({ kind: 'find', label: i18nService.t('Found'), target: `"${cmd.arg}"`, status: 'ok', detail: `${result.files.length} ${i18nService.t('file(s) matching')}` })
+            pushAction({ kind: 'find', label: i18nService.t('Found'), target: `"${cmd.arg}"`, status: 'ok', detail: `${result.files.length} ${i18nService.t('file(s) matching')}` })
             feedback.push(`FIND_FILES ${cmd.arg} result (${result.files.length} files${result.truncated ? ', truncated' : ''}):\n${result.files.join('\n') || '(no matches)'}`)
           } else {
             notes[i] = `⚠️ ${i18nService.t('Find failed for')} "${cmd.arg}": ${result.error}`
-            actions.push({ kind: 'find', label: i18nService.t('Found'), target: `"${cmd.arg}"`, status: 'failed', detail: `${result.error}` })
+            pushAction({ kind: 'find', label: i18nService.t('Found'), target: `"${cmd.arg}"`, status: 'failed', detail: `${result.error}` })
             feedback.push(`FIND_FILES ${cmd.arg}: failed - ${result.error}`)
           }
         }
       } catch (error) {
         notes[i] = `⚠️ ${i18nService.t('Search error')}: ${error}`
-        actions.push({ kind: cmd.type === 'grep' ? 'grep' : 'find', label: i18nService.t('Search error'), target: `"${cmd.arg}"`, status: 'failed', detail: `${error}` })
+        pushAction({ kind: cmd.type === 'grep' ? 'grep' : 'find', label: i18nService.t('Search error'), target: `"${cmd.arg}"`, status: 'failed', detail: `${error}` })
         feedback.push(`${cmd.type.toUpperCase()} ${cmd.arg}: failed - ${error}`)
       }
     } else if (cmd.type === 'read') {
@@ -586,7 +814,7 @@ async function parseAndExecuteFileCommands(
       // of rejecting the read.
       if (resolved.error || !resolved.path) {
         notes[i] = `⚠️ ${i18nService.t('Error reading file')} ${cmd.arg}: ${resolved.error}`
-        actions.push({ kind: 'read', label: i18nService.t('Read file'), target: cmd.arg, status: 'failed', detail: resolved.error })
+        pushAction({ kind: 'read', label: i18nService.t('Read file'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`READ_FILE ${cmd.arg}: failed - ${resolved.error}`)
         continue
       }
@@ -596,11 +824,15 @@ async function parseAndExecuteFileCommands(
         if (result.success) {
           const rel = pathRelativeToRoot(filePath)
           console.log(`File read: ${filePath}`)
-          if (state?.readCache?.get(filePath) === result.content) {
+          if (state?.readCache?.get(filePath) === result.content
+            // An elided earlier result is NOT in history any more -
+            // "unchanged" would tell the model to use content it
+            // cannot see. Elided paths always get the full body again.
+            && !state?.elidedReads?.has(rel)) {
             // Same file, same content - the model is re-verifying a file
             // it already has. Answer without re-sending the full text.
             notes[i] = `📖 ${i18nService.t('Read file')}: ${rel} (${i18nService.t('unchanged')})`
-            actions.push({ kind: 'read', label: i18nService.t('Read file'), target: rel, status: 'ok', detail: i18nService.t('unchanged') })
+            pushAction({ kind: 'read', label: i18nService.t('Read file'), target: rel, status: 'ok', detail: i18nService.t('unchanged') })
             feedback.push(
               `READ_FILE ${rel}: unchanged since your previous read - the content you already received is still current. Do not read it again; use what you have.`
             )
@@ -608,26 +840,26 @@ async function parseAndExecuteFileCommands(
             state?.readCache?.set(filePath, result.content ?? '')
             state?.readFiles?.add(rel)
             notes[i] = `📖 ${i18nService.t('Read file')}: ${rel}`
-            actions.push({ kind: 'read', label: i18nService.t('Read file'), target: rel, status: 'ok' })
+            pushAction({ kind: 'read', label: i18nService.t('Read file'), target: rel, status: 'ok' })
             feedback.push(`READ_FILE ${rel} result:\n${result.content}`)
           }
         } else {
           console.error(`Failed to read file: ${filePath}`, result.error)
           notes[i] = `⚠️ ${i18nService.t('Error reading file')} ${pathRelativeToRoot(filePath)}: ${result.error}`
-          actions.push({ kind: 'read', label: i18nService.t('Read file'), target: pathRelativeToRoot(filePath), status: 'failed', detail: `${result.error}` })
+          pushAction({ kind: 'read', label: i18nService.t('Read file'), target: pathRelativeToRoot(filePath), status: 'failed', detail: `${result.error}` })
           feedback.push(`READ_FILE ${pathRelativeToRoot(filePath)}: failed - ${result.error}`)
         }
       } catch (error) {
         console.error(`Error reading file: ${filePath}`, error)
         notes[i] = `⚠️ ${i18nService.t('Error reading file')} ${pathRelativeToRoot(filePath)}: ${error}`
-        actions.push({ kind: 'read', label: i18nService.t('Read file'), target: pathRelativeToRoot(filePath), status: 'failed', detail: `${error}` })
+        pushAction({ kind: 'read', label: i18nService.t('Read file'), target: pathRelativeToRoot(filePath), status: 'failed', detail: `${error}` })
         feedback.push(`READ_FILE ${pathRelativeToRoot(filePath)}: failed - ${error}`)
       }
     } else {
       needsContinuation = true
       if (resolved.error || !resolved.path) {
         notes[i] = `⚠️ ${i18nService.t('Error listing files')} ${cmd.arg}: ${resolved.error}`
-        actions.push({ kind: 'list', label: i18nService.t('Listed files in'), target: cmd.arg, status: 'failed', detail: resolved.error })
+        pushAction({ kind: 'list', label: i18nService.t('Listed files in'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`LIST_FILES ${cmd.arg}: failed - ${resolved.error}`)
         continue
       }
@@ -637,7 +869,7 @@ async function parseAndExecuteFileCommands(
         if (result.success && result.items) {
           console.log(`Files listed: ${directoryPath}`)
           notes[i] = `📁 ${i18nService.t('Listed files in')}: ${pathRelativeToRoot(directoryPath)}`
-          actions.push({ kind: 'list', label: i18nService.t('Listed files in'), target: pathRelativeToRoot(directoryPath), status: 'ok' })
+          pushAction({ kind: 'list', label: i18nService.t('Listed files in'), target: pathRelativeToRoot(directoryPath), status: 'ok' })
           const fileList = result.items.map((item: any) =>
             `${item.isDirectory ? 'DIR' : 'FILE'}: ${item.name}`
           ).join('\n')
@@ -645,13 +877,13 @@ async function parseAndExecuteFileCommands(
         } else {
           console.error(`Failed to list files: ${directoryPath}`, result.error)
           notes[i] = `⚠️ ${i18nService.t('Error listing files')} ${pathRelativeToRoot(directoryPath)}: ${result.error}`
-          actions.push({ kind: 'list', label: i18nService.t('Listed files in'), target: pathRelativeToRoot(directoryPath), status: 'failed', detail: `${result.error}` })
+          pushAction({ kind: 'list', label: i18nService.t('Listed files in'), target: pathRelativeToRoot(directoryPath), status: 'failed', detail: `${result.error}` })
           feedback.push(`LIST_FILES ${pathRelativeToRoot(directoryPath)}: failed - ${result.error}`)
         }
       } catch (error) {
         console.error(`Error listing files: ${directoryPath}`, error)
         notes[i] = `⚠️ ${i18nService.t('Error listing files')} ${pathRelativeToRoot(directoryPath)}: ${error}`
-        actions.push({ kind: 'list', label: i18nService.t('Listed files in'), target: pathRelativeToRoot(directoryPath), status: 'failed', detail: `${error}` })
+        pushAction({ kind: 'list', label: i18nService.t('Listed files in'), target: pathRelativeToRoot(directoryPath), status: 'failed', detail: `${error}` })
         feedback.push(`LIST_FILES ${pathRelativeToRoot(directoryPath)}: failed - ${error}`)
       }
     }
@@ -699,11 +931,31 @@ async function parseAndExecuteFileCommands(
         if (/^<{3,}/m.test(item.body) && /^>{3,}/m.test(item.body)) {
           batchEditFailed = true
           notes[item.index] = `⚠️ ${i18nService.t('Write failed for')} ${item.arg}: ${i18nService.t('diff markers found in content')}`
-          actions.push({ kind: 'write', label: i18nService.t('Write failed for'), target: item.arg, status: 'failed', detail: i18nService.t('diff markers found in content') })
+          pushAction({ kind: 'write', label: i18nService.t('Write failed for'), target: item.arg, status: 'failed', detail: i18nService.t('diff markers found in content') })
           feedback.push(
             `WRITE_FILE ${item.arg}: rejected - the content contains SEARCH/REPLACE diff markers ` +
             `(<<<<<<< / ======= / >>>>>>>). WRITE_FILE takes the raw file content only; ` +
             `re-emit it with just the file content, no diff syntax.`
+          )
+          needsContinuation = true
+          continue
+        }
+        // A WRITE_FILE that would shrink an existing file drastically is
+        // almost always a fragment - the model wrote "the first section
+        // for now" and the rest would be silently deleted. Block once
+        // and explain; a resend counts as an intentional rewrite.
+        if (looksLikeFragment(oldContent, item.body) && !state?.shrinkWarned?.has(item.path)) {
+          state?.shrinkWarned?.add(item.path)
+          batchEditFailed = true
+          const oldLines = oldContent.split('\n').length
+          const newLines = item.body.split('\n').length
+          notes[item.index] = `⚠️ ${i18nService.t('Blocked suspicious write to')} ${item.arg}: ${oldLines} → ${newLines} ${i18nService.t('lines')}`
+          pushAction({ kind: 'write', label: i18nService.t('Blocked suspicious write to'), target: item.arg, status: 'failed', detail: `${oldLines} → ${newLines} ${i18nService.t('lines')}` })
+          feedback.push(
+            `WRITE_FILE ${item.arg}: blocked - your content is only ${newLines} lines but the existing file has ${oldLines} lines. ` +
+            `WRITE_FILE replaces the ENTIRE file - this looks like a fragment and would delete the rest. ` +
+            `If this really is the complete new file, re-emit "// WRITE_FILE: ${item.arg}" with the FULL content and it will be accepted. ` +
+            `If you meant to change only part of the file, use EDIT_FILE instead.`
           )
           needsContinuation = true
           continue
@@ -715,7 +967,7 @@ async function parseAndExecuteFileCommands(
         if (!readable) {
           batchEditFailed = true
           notes[item.index] = `⚠️ ${i18nService.t('Cannot edit')} ${item.arg}: ${i18nService.t('file not found or unreadable')}`
-          actions.push({ kind: 'edit', label: i18nService.t('Cannot edit'), target: item.arg, status: 'failed', detail: i18nService.t('file not found or unreadable') })
+          pushAction({ kind: 'edit', label: i18nService.t('Cannot edit'), target: item.arg, status: 'failed', detail: i18nService.t('file not found or unreadable') })
           feedback.push(`${label} ${item.arg}: failed - file not found or unreadable. If you intended to create it, use // WRITE_FILE: with the full content instead.`)
           needsContinuation = true
           continue
@@ -725,7 +977,7 @@ async function parseAndExecuteFileCommands(
           batchEditFailed = true
           if (state) state.editFailCount++
           notes[item.index] = `⚠️ ${i18nService.t('Edit failed for')} ${item.arg}: ${applied.error}`
-          actions.push({ kind: 'edit', label: i18nService.t('Edit failed for'), target: item.arg, status: 'failed', detail: applied.error })
+          pushAction({ kind: 'edit', label: i18nService.t('Edit failed for'), target: item.arg, status: 'failed', detail: applied.error })
           // Weak models recover better from a tiny complete example than
           // from prose rules. After repeated failures, steer to WRITE_FILE
           // (a full-file rewrite is easier for them than diff syntax).
@@ -738,7 +990,39 @@ async function parseAndExecuteFileCommands(
           needsContinuation = true
           continue
         }
+        if (applied.alreadyApplied) {
+          // The desired end-state is already on disk (e.g. the model
+          // re-sent a diff that succeeded earlier). No write, no approval
+          // dialog - report it as done so the model moves on and the
+          // unresolved-edit tracker is cleared.
+          if (state) state.editFailCount = 0
+          notes[item.index] = `✅ ${i18nService.t('Already applied')}: ${pathRelativeToRoot(item.path)}`
+          pushAction({ kind: 'edit', label: i18nService.t('Already applied'), target: pathRelativeToRoot(item.path), status: 'ok' })
+          feedback.push(`${label} ${item.arg}: already applied - the replacement text is already in the file; no change needed`)
+          batchEditSucceeded = true
+          continue
+        }
         if (state) state.editFailCount = 0
+        // Same fragment guard as WRITE_FILE: an edit result that
+        // shrinks the file drastically is likely a truncated REPLACE
+        // block deleting more than intended. Block once, let a resend
+        // through.
+        if (looksLikeFragment(oldContent, applied.content!) && !state?.shrinkWarned?.has(item.path)) {
+          state?.shrinkWarned?.add(item.path)
+          batchEditFailed = true
+          const oldLines = oldContent.split('\n').length
+          const newLines = applied.content!.split('\n').length
+          notes[item.index] = `⚠️ ${i18nService.t('Blocked suspicious edit to')} ${item.arg}: ${oldLines} → ${newLines} ${i18nService.t('lines')}`
+          pushAction({ kind: 'edit', label: i18nService.t('Blocked suspicious edit to'), target: item.arg, status: 'failed', detail: `${oldLines} → ${newLines} ${i18nService.t('lines')}` })
+          feedback.push(
+            `EDIT_FILE ${item.arg}: blocked - the result would shrink the file from ${oldLines} to ${newLines} lines, ` +
+            `which looks like an accidental large deletion. ` +
+            `If this is intentional, re-emit the same EDIT_FILE for ${item.arg} and it will be allowed through; ` +
+            `otherwise split the change into smaller SEARCH/REPLACE blocks.`
+          )
+          needsContinuation = true
+          continue
+        }
         const edit: FileEdit = { filePath: item.path, oldContent, newContent: applied.content! }
         edits.push(edit)
         planByEdit.set(edit, item)
@@ -754,7 +1038,7 @@ async function parseAndExecuteFileCommands(
       const label = item.kind === 'write' ? 'WRITE_FILE' : 'EDIT_FILE'
       if (!approvedSet.has(edit)) {
         notes[item.index] = `⏭️ ${i18nService.t('Skipped (rejected by user)')}: ${pathRelativeToRoot(item.path)}`
-        actions.push({ kind: item.kind, label: i18nService.t('Skipped (rejected by user)'), target: pathRelativeToRoot(item.path), status: 'rejected' })
+        pushAction({ kind: item.kind, label: i18nService.t('Skipped (rejected by user)'), target: pathRelativeToRoot(item.path), status: 'rejected' })
         feedback.push(`${label} ${pathRelativeToRoot(item.path)}: rejected by user`)
         needsContinuation = true
         continue
@@ -768,7 +1052,7 @@ async function parseAndExecuteFileCommands(
         notes[item.index] = item.kind === 'write'
           ? `✅ ${i18nService.t('Wrote file')}: ${pathRelativeToRoot(item.path)}`
           : `✅ ${i18nService.t('Edited file')}: ${pathRelativeToRoot(item.path)}`
-        actions.push({
+        pushAction({
           kind: item.kind,
           label: item.kind === 'write' ? i18nService.t('Wrote file') : i18nService.t('Edited file'),
           target: pathRelativeToRoot(item.path),
@@ -784,6 +1068,48 @@ async function parseAndExecuteFileCommands(
           state.readCache?.set(item.path, edit.newContent)
         }
 
+        // Semantic residue check: a "successful" write can still be a
+        // fragment - the call site landed but the function body it
+        // references was lost to a truncated or partial edit. Calls
+        // whose name is defined nowhere in the project are exactly the
+        // "declared but never written" lie seen on real runs - tell the
+        // model so it can supply the missing definition.
+        if (/\.(?:jsx?|tsx?|mjs|cjs)$/i.test(item.path)) {
+          const suspects = findUndefinedCallees(edit.newContent)
+          const missing: string[] = []
+          const project = projectService.getCurrentProject()
+          for (const name of suspects) {
+            let defined = false
+            if (project?.isOpen && window.electronAPI) {
+              try {
+                const defPat =
+                  `(function|class|const|let|var)\\s+${escapeRegExp(name)}\\b` +
+                  `|\\b${escapeRegExp(name)}\\s*[:=]` +
+                  `|\\bimport\\b[^\\n]*\\b${escapeRegExp(name)}\\b`
+                const res = await window.electronAPI.searchFiles(project.rootPath, defPat)
+                if (res.success && res.matches && res.matches.length > 0) defined = true
+              } catch { /* leave as suspect */ }
+            }
+            if (!defined) missing.push(name)
+          }
+          if (missing.length > 0) {
+            pushAction({
+              kind: 'notice',
+              label: i18nService.t('Possibly undefined function call'),
+              target: `${item.arg}: ${missing.join(', ')}`,
+              status: 'failed',
+            })
+            feedback.push(
+              `NOTE: the file now calls ${missing.map(n => `\`${n}()\``).join(', ')} ` +
+              `but no definition for ${missing.length === 1 ? 'it' : 'them'} was found in the project. ` +
+              `A function body may have been dropped by a truncated or partial edit - ` +
+              `add the missing definition${missing.length === 1 ? '' : 's'} now with EDIT_FILE, ` +
+              `or explain where ${missing.length === 1 ? 'it is' : 'they are'} supposed to come from.`
+            )
+            needsContinuation = true
+          }
+        }
+
         // Emit event to refresh explorer (and editor if the file is open)
         window.dispatchEvent(new CustomEvent('file-created', {
           detail: { filePath: item.path }
@@ -791,7 +1117,7 @@ async function parseAndExecuteFileCommands(
       } catch (error) {
         console.error(`Error writing file: ${item.path}`, error)
         notes[item.index] = `⚠️ ${i18nService.t('Error writing file')} ${pathRelativeToRoot(item.path)}: ${error}`
-        actions.push({ kind: item.kind, label: i18nService.t('Error writing file'), target: pathRelativeToRoot(item.path), status: 'failed', detail: `${error}` })
+        pushAction({ kind: item.kind, label: i18nService.t('Error writing file'), target: pathRelativeToRoot(item.path), status: 'failed', detail: `${error}` })
         feedback.push(`${label} ${pathRelativeToRoot(item.path)}: failed - ${error}`)
         needsContinuation = true
         batchEditFailed = true
@@ -812,11 +1138,20 @@ async function parseAndExecuteFileCommands(
     for (const r of pendingRuns) {
       if (!approvedSet.has(r.command)) {
         notes[r.index] = `⏭️ ${i18nService.t('Skipped (rejected by user)')}: ${r.command}`
-        actions.push({ kind: 'run', label: i18nService.t('Skipped (rejected by user)'), target: r.command, status: 'rejected' })
+        pushAction({ kind: 'run', label: i18nService.t('Skipped (rejected by user)'), target: r.command, status: 'rejected' })
         feedback.push(`RUN_COMMAND ${r.command}: rejected by user`)
         needsContinuation = true
         continue
       }
+      // Publish a pending row before the (potentially long) execution so
+      // the card shows what is running right now, not only afterwards.
+      const runAction: AgentAction = {
+        kind: 'run',
+        label: i18nService.t('Running'),
+        target: r.command,
+        status: 'pending',
+      }
+      pushAction(runAction)
       try {
         const result = await runCommandAndWait(r.command)
         // Strip the project root from output before feeding it to the model -
@@ -835,14 +1170,10 @@ async function parseAndExecuteFileCommands(
         notes[r.index] = `▶️ ${i18nService.t('Ran')}: ${r.command} (${statusText})`
         // A non-zero exit reads as a failed step row; opens and timeouts
         // stay neutral since the process may still be alive.
-        const runAction: AgentAction = {
-          kind: 'run',
-          label: i18nService.t('Ran'),
-          target: r.command,
-          status: result.exitCode !== null && result.exitCode !== 0 ? 'failed' : 'ok',
-          detail: statusText,
-        }
-        actions.push(runAction)
+        runAction.label = i18nService.t('Ran')
+        runAction.status = result.exitCode !== null && result.exitCode !== 0 ? 'failed' : 'ok'
+        runAction.detail = statusText
+        onAction?.(actions)
         if (result.opened) {
           // Opening via the OS shell produces no terminal output - that IS
           // success. Feeding "(no output)" back makes small models read it as
@@ -858,6 +1189,7 @@ async function parseAndExecuteFileCommands(
             // the app afterwards.
             notes[r.index] += ` ⚠️ ${i18nService.t('opened while work was still unresolved')}`
             runAction.detail = `${statusText} ⚠️ ${i18nService.t('opened while work was still unresolved')}`
+            onAction?.(actions)
             feedback.push(
               'The app was opened while earlier work is still unresolved - the user may be looking at an incomplete version. ' +
               'Resolve the outstanding failure now (re-emit the file command or fix the failing command).'
@@ -916,7 +1248,10 @@ async function parseAndExecuteFileCommands(
         }
       } catch (error) {
         notes[r.index] = `⚠️ ${i18nService.t('Error running')} ${r.command}: ${error}`
-        actions.push({ kind: 'run', label: i18nService.t('Error running'), target: r.command, status: 'failed', detail: `${error}` })
+        runAction.label = i18nService.t('Error running')
+        runAction.status = 'failed'
+        runAction.detail = `${error}`
+        onAction?.(actions)
         feedback.push(`RUN_COMMAND ${r.command}: failed - ${error}`)
         needsContinuation = true
         if (state) state.unresolvedFailure = true
@@ -942,7 +1277,7 @@ async function parseAndExecuteFileCommands(
   if (echoingResults) {
     display += `\n\n⚠️ ${i18nService.t('Result block imitated - asking the model to retry')}`
   }
-  if (commands.length === 0 && creationIntent && hasFence && !readOnly) {
+  if (codeShownNudge) {
     display += `\n\n⚠️ ${i18nService.t('Code shown but not written - asking the model to retry')}`
   }
   if (deferred) {
@@ -1020,6 +1355,8 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   const stickToBottomRef = useRef(true)
   // Live streaming bubble (separate from the committed message list)
   const [streamingText, setStreamingText] = useState<string | null>(null)
+  // Transient progress note for the loading line (rate-limit backoff etc.)
+  const [runStatus, setRunStatus] = useState<string | null>(null)
   const streamedRef = useRef('')
   // Stack of pre-write snapshots - each entry rolls back one AI write batch
   const checkpointsRef = useRef<{ path: string; prevContent: string; existed: boolean }[][]>([])
@@ -1051,6 +1388,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       role: 'assistant',
       content: `↩️ ${i18nService.t('Rolled back {count} file(s) changed by the last AI operation.').replace('{count}', String(cp.length))}`,
       timestamp: Date.now(),
+      isError: true,
     }])
   }
 
@@ -1385,13 +1723,16 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Persist conversation whenever it changes
+  // Persist conversation whenever it changes. Live-run updates arrive
+  // per action now - debounce those bursts, but persist promptly once
+  // the turn settles so save cadence matches the pre-live behavior.
   useEffect(() => {
     messagesRef.current = messages
     if (messages.length === 0) return
-    void persistConversation()
+    const t = setTimeout(() => void persistConversation(), isLoading ? 800 : 0)
+    return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages])
+  }, [messages, isLoading])
 
   // Fold older turns into the rolling summary once the stored
   // conversation outgrows the history window. Runs after a completed
@@ -1404,6 +1745,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     const excerpt = all.slice(done, end)
     if (excerpt.length === 0) return
     const transcript = excerpt
+      .filter((m) => !isErrorMessage(m))
       .map((m) => `${m.role}: ${m.role === 'assistant' ? stripNoteLines(m.content) : m.content}`)
       .join('\n')
     const prior = contextSummaryRef.current
@@ -1508,8 +1850,17 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     void sendToAI(retryMessage, base)
   }
 
+  // One-click recovery from a context-full empty reply: bump num_ctx
+  // for this session only, then resend the message that failed.
+  const handleRaiseNumCtx = (proposed: number) => {
+    if (isLoading || !isConfigured) return
+    configService.setSessionOllamaNumCtx(proposed)
+    handleRetry()
+  }
+
   const sendToAI = async (userMessage: Message, historyBase: Message[]) => {
     setIsLoading(true)
+    setRunStatus(null)
 
     // Pin provider+model for this whole run: changing Settings while a
     // response is generating must not retarget later agent-loop steps or
@@ -1522,6 +1873,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     // Create abort controller for this request
     const controller = new AbortController()
     setAbortController(controller)
+    // Token counts of the last completed call - visible to the catch so a
+    // context-window saturation can be reported as such, not as a
+    // mysterious empty reply.
+    let lastUsage: Message['tokens']
 
     try {
       // Get project context dynamically
@@ -1557,10 +1912,15 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         context = context ? `${context}\n\n${summaryNote}` : summaryNote
       }
 
+      // Error bubbles and client-side warnings never reach the model.
+      // Filtering before the window slice keeps dropped error turns from
+      // shrinking the effective history.
+      const cleanHistoryBase = historyBase.filter((m) => !isErrorMessage(m))
+
       // When the window drops earlier turns, say so - otherwise the model
       // treats the first visible message as the conversation start and
       // confidently answers questions about history it cannot see.
-      if (historyBase.length > HISTORY_WINDOW) {
+      if (cleanHistoryBase.length > HISTORY_WINDOW) {
         const truncationNote =
           `Note: this conversation is long - only the last ${HISTORY_WINDOW} messages are shown verbatim` +
           (contextSummaryRef.current
@@ -1573,23 +1933,34 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // whose results it needs before it can continue. Execute the commands,
       // feed the results back to the model, and repeat until the model
       // responds without commands or we hit the step limit.
+      // +1 over the work budget: the closing-summary turn runs inside
+      // the loop too, so a model that keeps working (or defers) there
+      // gets its results fed back instead of ending the run mid-task.
       const MAX_STEPS = 6
       // Feed raw model output as history - display notes like "Ran: ..."
       // are UI decoration, and small models imitate them as fake output.
       // Legacy messages saved before rawContent existed get their note
       // lines stripped instead.
-      const historyForRequest: Message[] =
+      // `readSpans` marks the exact offsets of READ_FILE result bodies
+      // inside a pushed feedback entry, so a context squeeze can replace
+      // just those bodies with placeholders (see below).
+      const historyForRequest: (Message & { readSpans?: { path: string; start: number; end: number }[] })[] =
         // Only the recent window goes verbatim - older turns arrive via
         // the contextSummary injected into `context` above. The current
         // user message is NOT included here: sendMessage already appends
         // it as the request prompt, and listing it in history too would
         // send it twice. It is pushed after the first call so later
-        // agent-loop steps still see the original turn.
-        historyBase.slice(-HISTORY_WINDOW).map((m) => ({
+        // agent-loop steps still see the original turn. Assistant file
+        // blocks are elided - their content is on disk, not needed here.
+        cleanHistoryBase.slice(-HISTORY_WINDOW).map((m) => ({
           ...m,
-          content: m.rawContent ?? (m.role === 'assistant' ? stripNoteLines(m.content) : m.content),
+          content: m.role === 'assistant'
+            ? elideFileBlocks(m.rawContent ?? stripNoteLines(m.content))
+            : (m.rawContent ?? m.content),
         }))
       let currentInput = userMessage.content
+      // Carried from the results-builder to the next user-entry push.
+      let pendingReadSpans: { path: string; start: number; end: number }[] | undefined
       let lastStepRanCommands = false
       // Tracks consecutive EDIT_FILE failures across loop steps so the
       // feedback can steer the model to WRITE_FILE instead of retrying the
@@ -1605,10 +1976,30 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         readCache: new Map<string, string>(),
         readFiles: new Set<string>(),
         modifiedFiles: new Set<string>(),
+        lastTurnTruncated: false,
+        elidedReads: new Set<string>(),
+        shrinkWarned: new Set<string>(),
       }
       // One-shot guard: nudge the model at most once when it declares
       // completion while a failure is still unresolved.
       let failureNudged = false
+      // Warns once that a write/edit failure was left outstanding - used
+      // both when the model claims success after the nudge and at run
+      // end, where budget exhaustion can skip the nudge path entirely.
+      let unresolvedWarned = false
+      const warnUnresolvedEdit = () => {
+        if (!agentState.unresolvedEdit || unresolvedWarned) return
+        unresolvedWarned = true
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `⚠️ ${i18nService.t('A file edit failed and was never retried - the reported changes may not exist on disk. Please verify the file.')}`,
+          timestamp: Date.now(),
+          isError: true,
+        }])
+      }
+      // The closing-summary request fires at most once per run, after a
+      // step that executed commands.
+      let summaryAsked = false
       // Ask mode (read-only): captured once per run so toggling mid-run
       // cannot change the rules under an in-flight agent loop.
       const readOnly = configService.getChatMode() === 'ask'
@@ -1633,6 +2024,39 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         return { onDelta, getStreamed: () => streamedRef.current }
       }
 
+      // Replaces READ_FILE result bodies in the first `upto` history
+      // entries with a placeholder, marking each path so its next
+      // READ_FILE returns the full content (the "unchanged" short-
+      // circuit must not answer a result the model can no longer see).
+      const elideReadResults = (upto: number) => {
+        for (let i = 0; i < upto && i < historyForRequest.length; i++) {
+          const entry = historyForRequest[i]
+          if (entry.role !== 'user' || !entry.readSpans?.length) continue
+          let content = entry.content
+          for (let s = entry.readSpans.length - 1; s >= 0; s--) {
+            const { path, start, end } = entry.readSpans[s]
+            agentState.elidedReads.add(path)
+            content = content.slice(0, start) + '(content omitted - emit READ_FILE to fetch it again)' + content.slice(end)
+          }
+          entry.content = content
+          entry.readSpans = undefined
+        }
+      }
+
+      // Same shrink applied to the prompt still in flight: pendingReadSpans
+      // was recorded against currentInput's coordinates, which is what the
+      // attempts send.
+      const elideCurrentInput = (text: string) => {
+        if (!pendingReadSpans?.length) return text
+        let out = text
+        for (let s = pendingReadSpans.length - 1; s >= 0; s--) {
+          const { path, start, end } = pendingReadSpans[s]
+          agentState.elidedReads.add(path)
+          out = out.slice(0, start) + '(content omitted - emit READ_FILE to fetch it again)' + out.slice(end)
+        }
+        return out
+      }
+
       // A model that emits reasoning but no reply text routes its output
       // to a channel this protocol cannot read only when the model is
       // channel-routed (gpt-oss/harmony) - retry cannot fix that, so it
@@ -1644,10 +2068,24 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         onDelta: ((delta: string) => void) | undefined,
         onUsage: (u: NonNullable<Message['tokens']>) => void,
       ): Promise<string> => {
+        let attemptInput = input
+        let shrunkForRetry = false
         const attempt = (n: number): Promise<string> =>
-          llmService.sendMessage(input, context, historyForRequest, onDelta, controller.signal, llmPin, true, onUsage)
+          llmService.sendMessage(attemptInput, context, historyForRequest, onDelta, controller.signal, llmPin, true, onUsage, setRunStatus)
             .catch((e) => {
               if (e instanceof OllamaEmptyResponseError && !e.thinkingOnly && n < 2 && !controller.signal.aborted) {
+                // A prompt already at the context limit makes empty
+                // replies deterministic: Ollama left-shifts the window
+                // until the system prompt drops out, so resending the
+                // SAME prompt cannot recover. Shrink model-bound content
+                // first - elide READ_FILE bodies everywhere (the freshest
+                // included) and inside the in-flight prompt itself.
+                const numCtx = configService.getOllamaNumCtx() ?? 0
+                if (!shrunkForRetry && numCtx > 0 && (lastUsage?.input ?? 0) >= numCtx * 0.9) {
+                  shrunkForRetry = true
+                  elideReadResults(historyForRequest.length)
+                  attemptInput = elideCurrentInput(attemptInput)
+                }
                 return attempt(n + 1)
               }
               throw e
@@ -1655,21 +2093,71 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         return attempt(0)
       }
 
-      for (let step = 0; step < MAX_STEPS; step++) {
+      for (let step = 0; step < MAX_STEPS + 1; step++) {
         if (controller.signal.aborted) break
 
         const { onDelta, getStreamed } = makeStreamHandler()
         const callStart = performance.now()
         let usage: Message['tokens']
-        const response = await sendAgent(currentInput, onDelta, (u) => { usage = u })
+        const response = await sendAgent(currentInput, onDelta, (u) => { usage = u; lastUsage = u })
         const latencyMs = Math.round(performance.now() - callStart)
         // Persist this step's prompt (the user message at step 0, tool
         // results afterwards) into the running history. Without this each
         // READ_FILE/RUN_COMMAND result exists in context for exactly one
         // step - a model that re-reads the file gets only "unchanged",
         // the original content having already scrolled out of reach.
-        historyForRequest.push({ role: 'user', content: currentInput, timestamp: Date.now() })
-        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly)
+        historyForRequest.push({ role: 'user', content: currentInput, timestamp: Date.now(), readSpans: pendingReadSpans })
+        pendingReadSpans = undefined
+        // Shrink what later calls no longer need:
+        //  - the previous assistant reply's file blocks always reduce to
+        //    marker lines (the freshest reply stays intact until then so
+        //    "continue where you stopped" feedback matches it), and
+        //  - when the prompt is already most of num_ctx, older READ_FILE
+        //    result bodies reduce to placeholders too. Elided paths are
+        //    marked so their next READ_FILE returns the full content
+        //    again instead of "unchanged".
+        const prevAssistant = historyForRequest[historyForRequest.length - 2]
+        if (prevAssistant?.role === 'assistant') {
+          prevAssistant.content = elideFileBlocks(prevAssistant.content)
+        }
+        const numCtxLimit = configService.getOllamaNumCtx() ?? 0
+        if (numCtxLimit > 0 && (lastUsage?.input ?? 0) >= numCtxLimit * 0.7) {
+          elideReadResults(historyForRequest.length - 1)
+        }
+
+        // Commit the step message BEFORE running its commands: long work
+        // (approval waits, RUN_COMMAND) then shows the card growing live
+        // instead of a bare "Generating response" for the whole step.
+        const stepMsg: Message = {
+          role: 'assistant',
+          content: getStreamed() || response,
+          timestamp: Date.now(),
+          latencyMs,
+          model: runLabel || undefined,
+          tokens: usage,
+          rawContent: response,
+        }
+        setMessages((prev) => [...prev, stepMsg])
+        // Patch the trailing message: object identity fails after the
+        // first patch replaces stepMsg with a copy. Nothing else appends
+        // messages while this step's commands are still executing.
+        const updateStep = (patch: Partial<Message>) =>
+          setMessages((prev) => {
+            if (prev.length === 0) return prev
+            const copy = [...prev]
+            copy[copy.length - 1] = { ...copy[copy.length - 1], ...patch }
+            return copy
+          })
+
+        // done_reason 'length': the token/context limit cut the reply
+        // off - the model did not choose to stop. The flag reaches the
+        // truncated-block feedback via agentState, and a reply with no
+        // continuation signal still gets a "finish your thought" turn
+        // instead of ending the run mid-sentence.
+        const truncatedByLimit = usage?.doneReason === 'length'
+        agentState.lastTurnTruncated = truncatedByLimit
+
+        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly, (acts) => updateStep({ actions: [...acts] }))
         if (blockedInAskMode) askModeBlocked = true
         if (controller.signal.aborted) break
         setStreamingText(null)
@@ -1679,21 +2167,17 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         }
         lastStepRanCommands = feedback.length > 0
 
-        const finalText = display || getStreamed()
-        if (finalText) {
-          const assistantMessage: Message = {
-            role: 'assistant',
-            content: finalText,
-            timestamp: Date.now(),
-            latencyMs,
-            model: runLabel || undefined,
-            tokens: usage,
-            rawContent: response,
-            actions: actions && actions.length > 0 ? actions : undefined,
-            canRetryInCodeMode: readOnly && askModeBlocked ? true : undefined,
-          }
-          setMessages((prev) => [...prev, assistantMessage])
+        const stepActions = actions ? [...actions] : []
+        if (truncatedByLimit) {
+          stepActions.push({ kind: 'notice', label: i18nService.t('Reply cut off at the token limit - asking the model to continue'), target: '', status: 'failed' })
         }
+
+        const finalText = display || getStreamed()
+        updateStep({
+          content: finalText || stepMsg.content,
+          actions: stepActions.length > 0 ? stepActions : undefined,
+          canRetryInCodeMode: readOnly && askModeBlocked ? true : undefined,
+        })
 
         historyForRequest.push({ role: 'assistant', content: response, timestamp: Date.now() })
 
@@ -1701,6 +2185,18 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         // declared completion while an earlier command/edit failure is still
         // unresolved, give it one chance to fix or explicitly justify it.
         if (!needsContinuation) {
+          // A reply cut off by the token/context limit was forcibly
+          // stopped mid-thought - let the model finish instead of ending
+          // the run mid-sentence. The "keep it short" instruction keeps
+          // the next reply under the limit; a model that truncates every
+          // turn is still bounded by the step budget.
+          if (truncatedByLimit) {
+            currentInput =
+              `Your previous reply was cut off by the output token limit mid-thought. ` +
+              `Continue from where you stopped - keep this reply SHORT: minimal prose, ` +
+              `and emit file content in small pieces (a few EDIT_FILE blocks at a time).`
+            continue
+          }
           if ((agentState.unresolvedFailure || agentState.unresolvedEdit) && !failureNudged) {
             failureNudged = true
             const last = agentState.lastRunFailure
@@ -1722,12 +2218,19 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           // failed was still never retried. The nudge above already gave it
           // a chance to respond; if it now claims success, surface the
           // discrepancy to the user instead of trusting the claim.
-          if (failureNudged && agentState.unresolvedEdit) {
-            setMessages((prev) => [...prev, {
-              role: 'assistant',
-              content: `⚠️ ${i18nService.t('A file edit failed and was never retried - the reported changes may not exist on disk. Please verify the file.')}`,
-              timestamp: Date.now(),
-            }])
+          if (failureNudged) warnUnresolvedEdit()
+          // A step that ran commands left only note lines visible - ask
+          // once for a closing answer. It goes through the normal loop
+          // (not a one-shot call) so a model that emits commands or
+          // defers here gets results fed back like any other step
+          // instead of ending the run mid-task.
+          if (lastStepRanCommands && !summaryAsked) {
+            summaryAsked = true
+            currentInput =
+              `The file operations completed. Reply to the user with a brief summary ` +
+              `of what you did, in the same language as the user's request. ` +
+              `Do not emit any file commands.`
+            continue
           }
           break
         }
@@ -1736,9 +2239,26 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         // the remaining step budget and how to close out the task. The
         // STATE line first reminds them what they have already done so
         // they neither redo it nor ask the user about it.
+        // Build the results section item by item so each READ_FILE
+        // body's exact span is known - a later context squeeze replaces
+        // those bodies without regex-parsing the joined text.
+        const resultsPrefix =
+          formatStateDigest(agentState) + `Command execution results:\n`
+        let resultsBody = ''
+        const readSpans: { path: string; start: number; end: number }[] = []
+        feedback.forEach((f, i) => {
+          if (i > 0) resultsBody += '\n\n'
+          const m = /^READ_FILE (\S+) result[^\n]*:\n/.exec(f)
+          if (m) readSpans.push({
+            path: m[1],
+            start: resultsPrefix.length + resultsBody.length + m[0].length,
+            end: resultsPrefix.length + resultsBody.length + f.length,
+          })
+          resultsBody += f
+        })
+        pendingReadSpans = readSpans.length > 0 ? readSpans : undefined
         currentInput =
-          formatStateDigest(agentState) +
-          `Command execution results:\n${feedback.join('\n\n')}\n\n` +
+          resultsPrefix + resultsBody + '\n\n' +
           // Models often abandon a failed edit and keep reading files or
           // running tests instead of retrying it. While any write/edit is
           // still outstanding, remind every step so the failure cannot be
@@ -1746,14 +2266,17 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           (agentState.unresolvedEdit
             ? `Reminder: an earlier EDIT_FILE/WRITE_FILE failed and no file change has succeeded since - the target file is still UNCHANGED on disk. Re-emit the change now (EDIT_FILE with an exact SEARCH block, or WRITE_FILE with the full file content) before continuing.\n\n`
             : '') +
-          `(Step ${step + 1} of ${MAX_STEPS}) ` +
+          `(Step ${Math.min(step + 1, MAX_STEPS)} of ${MAX_STEPS}) ` +
           `Continue with the user's request. If the work is already done, ` +
           `reply with the final answer only - no file commands.`
       }
 
-      // If the last step executed commands (e.g. writes), the visible reply is
-      // only command notes like "Wrote file: ..." - ask the model for a
-      // closing answer addressed to the user.
+      // If the loop ended with the last step having run commands but no
+      // closing answer - the step budget ran out mid-work, or the
+      // summary continue had no slot left - give the run a closing
+      // balloon anyway. The in-loop summary path already covers the
+      // normal finish; this is the exhausted-budget safety net.
+      // Continuation is spent, so needsContinuation is ignored here.
       if (lastStepRanCommands && !controller.signal.aborted) {
         const summaryInput =
           `The file operations completed. Reply to the user with a brief summary ` +
@@ -1763,9 +2286,11 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         const { onDelta: onSummaryDelta, getStreamed: getSummaryStreamed } = makeStreamHandler()
         const summaryStart = performance.now()
         let summaryUsage: Message['tokens']
-        const summary = await sendAgent(summaryInput, onSummaryDelta, (u) => { summaryUsage = u })
+        const summary = await sendAgent(summaryInput, onSummaryDelta, (u) => { summaryUsage = u; lastUsage = u })
         const summaryLatencyMs = Math.round(performance.now() - summaryStart)
-        const { display: summaryDisplay, actions: summaryActions } = await parseAndExecuteFileCommands(summary, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, undefined, readOnly)
+        // Last turn of the run: the code-shown nudge would only emit a
+        // misleading "asking the model to retry" note, so pre-set it.
+        const { display: summaryDisplay, actions: summaryActions } = await parseAndExecuteFileCommands(summary, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, { ...agentState, codeShownNudged: true }, readOnly)
         if (controller.signal.aborted) return
         setStreamingText(null)
         const summaryText = summaryDisplay || getSummaryStreamed()
@@ -1779,10 +2304,16 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             tokens: summaryUsage,
             rawContent: summary,
             actions: summaryActions && summaryActions.length > 0 ? summaryActions : undefined,
-            canRetryInCodeMode: readOnly && askModeBlocked ? true : undefined,
           }])
         }
       }
+
+      // A run can end with a write/edit failure still outstanding and
+      // never nudged - the step budget ran out while needsContinuation
+      // stayed true, so the nudge path never ran. The closing balloon
+      // must not stand as an unqualified success - warn that the disk
+      // may not match what the model reported.
+      warnUnresolvedEdit()
 
       // Compact older history into the rolling summary - keeps model
       // input bounded on long chats (fire-and-forget, Settings-gated).
@@ -1794,10 +2325,28 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       console.error('Error sending message:', error)
       // User-cancelled: keep whatever was streamed so far, no error message
       if (!controller.signal.aborted) {
+        // A context window at capacity produces empty replies: Ollama
+        // left-shifts the window, the system prompt drops out, and the
+        // model returns nothing. When the last call used ~all of num_ctx,
+        // say so - "empty response" alone sends users down the wrong path.
+        const numCtx = configService.getOllamaNumCtx() ?? 0
+        const used = (lastUsage?.input ?? 0) + (lastUsage?.output ?? 0)
+        const contextFull = error instanceof OllamaEmptyResponseError && !error.thinkingOnly
+          && numCtx > 0 && used >= numCtx * 0.9
         const errorMessage: Message = {
           role: 'assistant',
-          content: `${i18nService.t('Error')}: ${error instanceof Error ? error.message : i18nService.t('Failed to get response')}`,
+          content: `${i18nService.t('Error')}: ${error instanceof Error ? error.message : i18nService.t('Failed to get response')}` +
+            (contextFull
+              ? `\n\n${i18nService.t('The context window may be full ({used} of {limit} tokens). Start a new chat, or raise Ollama num_ctx in Settings.')
+                  .replace('{used}', String(used))
+                  .replace('{limit}', String(numCtx))}`
+              : ''),
           timestamp: Date.now(),
+          isError: true,
+          // Doubling is a safe recovery step for the "agent loop +
+          // file reads" workload; the override is session-only, so a
+          // too-large value can never persist by accident.
+          canRaiseNumCtx: contextFull ? numCtx * 2 : undefined,
         }
         setMessages((prev) => [...prev, errorMessage])
       } else if (streamedRef.current) {
@@ -1810,6 +2359,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       }
       setStreamingText(null)
       streamedRef.current = ''
+      setRunStatus(null)
     } finally {
       setIsLoading(false)
       setAbortController(null)
@@ -1841,12 +2391,14 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   // Step prose (the model's narration between commands) stays inside its
   // step; legacy messages without `actions` render as plain bubbles.
   const renderItems: ({ kind: 'msg'; m: Message; index: number } | { kind: 'run'; steps: Message[] })[] = []
+  let lastRunIndex = -1
   messages.forEach((m, index) => {
     const last = renderItems[renderItems.length - 1]
     if (m.role === 'assistant' && m.actions?.length && last?.kind === 'run') {
       last.steps.push(m)
     } else if (m.role === 'assistant' && m.actions?.length) {
       renderItems.push({ kind: 'run', steps: [m] })
+      lastRunIndex = renderItems.length - 1
     } else {
       renderItems.push({ kind: 'msg', m, index })
     }
@@ -1974,8 +2526,15 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           </div>
         )}
         {renderItems.map((item, ri) => item.kind === 'run' ? (
+          // Only the live run stays expanded: it folds itself when the
+          // run ends (open flips false), and older runs render folded.
+          // lastRunIndex - not "last item" - because trailing non-action
+          // messages (unresolved-edit warning, closing summary) must not
+          // collapse the still-running card mid-flight. A manual toggle
+          // mid-run wins because React only re-applies the attribute
+          // when this expression changes.
           <React.Fragment key={`run-${ri}`}>
-          <details className="agent-run" open>
+          <details className="agent-run" open={isLoading && ri === lastRunIndex}>
             <summary>
               <span className="agent-run-title">⚙️ {t('Agent run')}</span>
               <span className="agent-run-meta">
@@ -1999,6 +2558,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
                           m.tokens
                             ? `in ${m.tokens.input?.toLocaleString() ?? '?'} / out ${m.tokens.output?.toLocaleString() ?? '?'} ${t('tokens')}`
                             : null,
+                          m.tokens?.cached ? `cached ${m.tokens.cached.toLocaleString()}` : null,
                         ].filter(Boolean).join(' · ')}
                       </span>
                     )}
@@ -2060,6 +2620,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
                     item.m.tokens
                       ? `in ${item.m.tokens.input?.toLocaleString() ?? '?'} / out ${item.m.tokens.output?.toLocaleString() ?? '?'} ${t('tokens')}`
                       : null,
+                    item.m.tokens?.cached ? `cached ${item.m.tokens.cached.toLocaleString()}` : null,
                   ].filter(Boolean).join(' · ')})
                 </div>
               )}
@@ -2070,6 +2631,15 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
                   disabled={isLoading}
                 >
                   {t('Retry in code mode')}
+                </button>
+              )}
+              {item.m.role === 'assistant' && item.m.canRaiseNumCtx && item.index === messages.length - 1 && (
+                <button
+                  className="retry-code-mode-button"
+                  onClick={() => handleRaiseNumCtx(item.m.canRaiseNumCtx!)}
+                  disabled={isLoading}
+                >
+                  {t('Raise num_ctx to {n} for this session and retry').replace('{n}', String(item.m.canRaiseNumCtx))}
                 </button>
               )}
             </div>
@@ -2088,14 +2658,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             <div className="message-content">
               <div className="message-role">{t('assistant')}{(activeModel || currentModel) && ` (${activeModel || currentModel})`}</div>
               <div className="message-text loading">
-                <span className="loading-dots">{t('Generating response')}</span>
-                <button 
-                  className="cancel-button" 
-                  onClick={handleCancel}
-                  title={t('Cancel request')}
-                >
-                  ✕
-                </button>
+                <span className="loading-dots">{runStatus || t('Generating response')}</span>
               </div>
             </div>
           </div>
@@ -2151,11 +2714,12 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             </button>
           </div>
           <button
-            onClick={handleSend}
-            disabled={isLoading || !input.trim() || !isConfigured}
-            className="send-button"
+            onClick={isLoading ? handleCancel : handleSend}
+            disabled={!isLoading && (!input.trim() || !isConfigured)}
+            className={isLoading ? 'send-button stop-button' : 'send-button'}
+            title={isLoading ? t('Cancel request') : undefined}
           >
-            {isConfigured ? t('Send') : t('Ollama')}
+            {isLoading ? `■ ${t('Stop')}` : isConfigured ? t('Send') : t('Ollama')}
           </button>
         </div>
       </div>
@@ -2167,6 +2731,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           onApprove={resolveApproval}
           onReject={() => resolveApproval(null)}
           onRejectOne={handleRejectOneEdit}
+          onCancel={handleCancel}
         />
       )}
       {pendingCommands && pendingCommands.length > 0 && (
@@ -2175,6 +2740,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           onApprove={resolveCommandApproval}
           onReject={() => resolveCommandApproval(null)}
           onRejectOne={handleRejectOneCommand}
+          onCancel={handleCancel}
         />
       )}
       {showProjectModal && (

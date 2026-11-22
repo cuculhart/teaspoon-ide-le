@@ -128,6 +128,11 @@ function setupIpcHandlers() {
         path: path.join(dirPath, entry.name),
         isDirectory: entry.isDirectory(),
       }))
+      // Folders before files (VS Code's default sort), case-insensitive
+      // natural order inside each group.
+      items.sort((a, b) =>
+        (a.isDirectory === b.isDirectory ? 0 : a.isDirectory ? -1 : 1)
+        || a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }))
       return { success: true, items }
     } catch (error) {
       return { success: false, error: error.message }

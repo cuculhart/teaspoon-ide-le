@@ -19,10 +19,16 @@ export interface ModelInfo {
 
 // Token counts reported back by a provider when its API returns them
 // (Ollama prompt_eval_count/eval_count). Absent fields mean the provider
-// did not report that direction.
+// did not report that direction. `cached` is the implicit context-cache
+// hit portion of `input` (no current provider reports it). `doneReason`
+// is the generation stop cause (Ollama done_reason: 'stop'/'length') -
+// 'length' means the reply was cut off by the token/context limit, not
+// by the model's choice.
 export interface TokenUsage {
   input?: number
   output?: number
+  cached?: number
+  doneReason?: string
 }
 
 export interface SendArgs {
@@ -38,6 +44,9 @@ export interface SendArgs {
   agent?: boolean
   // Called once per response when the API reports token counts.
   onUsage?: (usage: TokenUsage) => void
+  // Transient progress state for the loading indicator (e.g. rate-limit
+  // backoff). Not message content.
+  onStatus?: (status: string) => void
 }
 
 // Local Edition ships exactly one backend: Ollama on localhost. There is

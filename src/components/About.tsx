@@ -24,7 +24,7 @@ const About: React.FC<AboutProps> = ({ onClose }) => {
         <div className="settings-content about-content">
           <img src={iconUrl} className="about-icon" alt="Teaspoon IDE Local Edition" />
           <h3 className="about-app-name">Teaspoon IDE Local Edition</h3>
-          <p className="about-version">{t('Version')} 1.0.0</p>
+          <p className="about-version">{t('Version')} 1.1.0</p>
           <p className="about-tagline">
             {t('Offline-first, local-only AI IDE (Japanese)')}
           </p>

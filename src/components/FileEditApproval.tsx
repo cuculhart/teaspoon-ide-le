@@ -18,9 +18,12 @@ interface FileEditApprovalProps {
   onApprove: (edits: FileEdit[]) => void
   onReject: () => void
   onRejectOne: (edit: FileEdit) => void
+  // Abort the whole agent run (reject + cancel) - the chat's Stop button
+  // is unreachable under this modal's fullscreen overlay.
+  onCancel?: () => void
 }
 
-const FileEditApproval: React.FC<FileEditApprovalProps> = ({ edits, onApprove, onReject, onRejectOne }) => {
+const FileEditApproval: React.FC<FileEditApprovalProps> = ({ edits, onApprove, onReject, onRejectOne, onCancel }) => {
   const t = useT()
   const [expandedEdits, setExpandedEdits] = useState<Set<number>>(new Set([0]))
   const [monacoTheme, setMonacoTheme] = useState<ResolvedTheme>(themeService.getResolvedTheme())
@@ -41,6 +44,16 @@ const FileEditApproval: React.FC<FileEditApprovalProps> = ({ edits, onApprove, o
       newExpanded.add(index)
     }
     setExpandedEdits(newExpanded)
+  }
+
+  // A result that shrinks a non-trivial file to under half its size is
+  // usually a fragment from a truncated or partial model response -
+  // flag it so the user does not approve a destructive write by habit.
+  const isDrasticShrink = (edit: FileEdit): boolean => {
+    if (edit.oldContent.trim() === '') return false
+    if (edit.newContent.trim() === '') return true
+    const oldLines = edit.oldContent.split('\n').length
+    return oldLines >= 20 && edit.newContent.split('\n').length * 2 < oldLines
   }
 
   const diffHeight = (edit: FileEdit): number => {
@@ -64,6 +77,11 @@ const FileEditApproval: React.FC<FileEditApprovalProps> = ({ edits, onApprove, o
             <div key={edit.filePath} className="edit-item">
               <div className="edit-header">
                 <span className="file-path">{edit.filePath}</span>
+                {isDrasticShrink(edit) && (
+                  <span className="shrink-warning">
+                    ⚠️ {t('This edit drastically shrinks the file')}
+                  </span>
+                )}
                 <div className="edit-actions">
                   <button
                     className="expand-button"
@@ -109,6 +127,11 @@ const FileEditApproval: React.FC<FileEditApprovalProps> = ({ edits, onApprove, o
         </div>
 
         <div className="approval-actions">
+          {onCancel && (
+            <button className="stop-run-button" onClick={onCancel} title={t('Cancel request')}>
+              ■ {t('Stop')}
+            </button>
+          )}
           <button className="reject-all-button" onClick={onReject}>
             {t('Reject All')}
           </button>
