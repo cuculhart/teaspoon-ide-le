@@ -358,3 +358,18 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* Small inline button inside a setting-description note (num_ctx guide) */
+.ctx-guide-button {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ctx-guide-button:hover {
+  background: var(--accent-hover);
+}

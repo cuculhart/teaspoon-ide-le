@@ -14,6 +14,8 @@ import { findFileCommands } from '../services/commandParser'
 import { OllamaEmptyResponseError, ollamaService } from '../services/ollamaService'
 import type { AgentAction } from '../types/agent'
 import { commandResultVerdict, formatStateDigest, TEST_COMMAND_RE } from '../services/toolFeedback'
+import { checkpointService } from '../services/checkpointService'
+import { validateFileSyntax } from '../services/syntaxValidator'
 import { renderMarkdown, MARKDOWN_CSS } from '../utils/markdown'
 import './Chat.css'
 
@@ -174,6 +176,32 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+// Key for per-path run-state maps (re-read gate, SEARCH-miss streak,
+// syntax-rollback count). Resolved paths already use forward slashes;
+// lowercasing keeps "Script.js" and "script.js" the same file.
+const gateKey = (p: string): string => p.replace(/\\/g, '/').toLowerCase()
+
+// Stagnation-watchdog helpers: compare consecutive model replies for
+// near-duplication. Replies are normalized (case + whitespace) and
+// compared on word-bigram overlap (Dice coefficient) - robust to the
+// small drift local models add on each turn.
+const normReply = (s: string): string => s.toLowerCase().replace(/\s+/g, ' ').trim()
+
+function replySimilarity(a: string, b: string): number {
+  if (a === b) return 1
+  const grams = (s: string): Set<string> => {
+    const w = s.split(' ')
+    const g = new Set<string>()
+    for (let i = 0; i < w.length - 1; i++) g.add(`${w[i]} ${w[i + 1]}`)
+    return g
+  }
+  const ga = grams(a), gb = grams(b)
+  if (ga.size === 0 || gb.size === 0) return 0
+  let shared = 0
+  for (const g of ga) if (gb.has(g)) shared++
+  return (2 * shared) / (ga.size + gb.size)
+}
+
 // Resolved absolute path -> path relative to the project root (or unchanged
 // when no project / outside the root)
 function pathRelativeToRoot(absPath: string): string {
@@ -222,6 +250,10 @@ interface CommandExecutionResult {
   // Ask mode blocked at least one mutating command this step - the UI
   // offers a one-click "retry in code mode" on the run's final reply.
   blockedInAskMode?: boolean
+  // The user explicitly bounded this run's scope and the reply ended
+  // asking permission - a legitimate stop point the agent loop must
+  // honor instead of auto-continuing past it.
+  stopAtUserBoundary?: boolean
 }
 
 // Command parsing lives in ../services/commandParser (unit-testable there).
@@ -401,6 +433,10 @@ async function parseAndExecuteFileCommands(
     // Successful file edits so far; a test command failing before any
     // edit means the failure is pre-existing, not a regression.
     editsApplied?: number
+    // WRITE/EDIT commands parsed this run (attempted, not necessarily
+    // applied) - lets the run-end disclosure distinguish "every change
+    // failed" from "the model never emitted a write command".
+    editsAttempted?: number
     lastRunFailure?: { command: string; exitCode: number | null; timedOut: boolean; tail: string } | null
     preEditTestFailure?: { command: string; tail: string } | null
     // Files read so far this run (absolute path -> content). A repeat
@@ -428,6 +464,20 @@ async function parseAndExecuteFileCommands(
     // and is let through - otherwise legitimate rewrites could never
     // shrink a file.
     shrinkWarned?: Set<string>
+    // Consecutive SEARCH-miss EDIT_FILE failures per resolved path. At 2
+    // the path enters readGate and stays until a READ_FILE succeeds -
+    // small models otherwise retry the same stale edit forever (the
+    // "re-read and retry" instruction is reliably ignored).
+    searchFailStreak?: Map<string, number>
+    // Paths whose next WRITE/EDIT is held until the model reads the
+    // file again - enforced before the approval dialog ever opens.
+    readGate?: Set<string>
+    // Syntax-validation rollbacks per file this run; past a small cap
+    // the writes keep being rolled back but the feedback warns louder.
+    syntaxRollbacks?: Map<string, number>
+    // Paths already warned about for context-heavy READ_FILE results
+    // (one advisory per file per run is enough).
+    largeReadWarned?: Set<string>
   },
   // Ask (read-only) mode: WRITE_FILE/EDIT_FILE/RUN_COMMAND/CLOSE_PROJECT
   // are blocked before any approval prompt or disk/shell access.
@@ -562,6 +612,21 @@ async function parseAndExecuteFileCommands(
   const deferred = JA_DEFERRAL.test(scanText) || EN_DEFERRAL.test(scanText)
     || JA_WORK_OFFER.test(scanText) || JA_ANNOUNCE_THEN_ASK.test(scanText)
     || JA_NEXT_WORK.test(scanText) || EN_NEXT_WORK.test(scanText)
+
+  // User-scoped stop: when the request explicitly bounded the work
+  // ("ステップ1のみ", "stop after X", "do not proceed"), a reply ending
+  // with a permission question is a legitimate stop point - otherwise
+  // the feedback-driven continuation steamrolls the user's boundary
+  // (observed: "のみ…停止してください" ignored across several more
+  // command turns). Both conditions are required: a scope marker alone
+  // is too loose, and unanswered questions mid-run are normal.
+  const USER_SCOPED_STOP =
+    /(?:のみ|だけ|まで|停止|止めて|止まれ|止まって|進んではいけ|進まない|超えないで|\bonly\b|\bjust\b|\bstop\b|\bhalt\b|do not (?:continue|proceed)|don't (?:continue|proceed))/i
+  const replyTail = response.trim().slice(-160)
+  const ASKS_PERMISSION =
+    /[?？]\s*$/.test(replyTail) ||
+    /(?:お知らせください|お待ちしています|待っています|教えてください|連絡ください|聞かせてください|let me know|waiting for (?:you|your)|awaiting your)\s*[。.\s]*$/i.test(replyTail)
+  const stopAtUserBoundary = USER_SCOPED_STOP.test(userText) && ASKS_PERMISSION
   // "how is X created" / "where is X written" are questions, not
   // file-creation requests - a fenced snippet there is an explanation.
   // Missing a real nudge is cheap; a false one burns a paid turn.
@@ -638,13 +703,16 @@ async function parseAndExecuteFileCommands(
     pushAction({ kind: 'notice', label: i18nService.t('Result block imitated - asking the model to retry'), target: '', status: 'failed' })
     needsContinuation = true
   }
-  if (deferred) {
+  if (deferred && !stopAtUserBoundary) {
     feedback.push(
       'You ended your turn asking the user to say "continue" (or similar) before emitting the rest of the work. ' +
       'Do not wait for the user - continue NOW in this response and emit the remaining file commands or output you listed.'
     )
     pushAction({ kind: 'notice', label: i18nService.t('Deferred to a later response - asking the model to continue now'), target: '', status: 'failed' })
     needsContinuation = true
+  }
+  if (stopAtUserBoundary) {
+    pushAction({ kind: 'notice', label: i18nService.t("Stopped at the model's question - reply to continue"), target: '', status: 'ok' })
   }
   if (codeShownNudge) {
     feedback.push(
@@ -677,6 +745,11 @@ async function parseAndExecuteFileCommands(
   const pendingRuns: { index: number; command: string }[] = []
   let blockedInAskMode = false
 
+  if (state) {
+    state.editsAttempted = (state.editsAttempted ?? 0) +
+      commands.filter(c => c.type === 'write' || c.type === 'edit').length
+  }
+
   // First pass: run reads/lists, collect writes for approval
   for (let i = 0; i < commands.length; i++) {
     const cmd = commands[i]
@@ -708,6 +781,20 @@ async function parseAndExecuteFileCommands(
         pushAction({ kind: 'write', label: i18nService.t('Rejected write to'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`WRITE_FILE ${cmd.arg}: rejected - ${resolved.error}`)
         needsContinuation = true
+      } else if (state?.readGate?.has(gateKey(resolved.path))) {
+        // Re-read gate: repeated SEARCH misses mean the model's copy of
+        // this file is stale. Hold every write/edit to it until a
+        // READ_FILE succeeds - enforced here so the command never
+        // reaches the approval dialog (instructions alone get ignored).
+        const rel = pathRelativeToRoot(resolved.path)
+        notes[i] = `⏭️ ${i18nService.t('Held until the file is re-read')}: WRITE_FILE ${rel}`
+        pushAction({ kind: 'notice', label: i18nService.t('Held until the file is re-read'), target: rel, status: 'failed' })
+        feedback.push(
+          `WRITE_FILE ${rel}: held - your earlier edits to this file kept missing their SEARCH text, ` +
+          `which means your copy of it is stale. Emit "// READ_FILE: ${rel}" first and base the next ` +
+          `change on the content it returns.`
+        )
+        needsContinuation = true
       } else {
         const rel = pathRelativeToRoot(resolved.path)
         const strayDir = findUnrequestedSubdir(userText, rel)
@@ -729,6 +816,17 @@ async function parseAndExecuteFileCommands(
         notes[i] = `⚠️ ${i18nService.t('Rejected edit to')} ${cmd.arg}: ${resolved.error}`
         pushAction({ kind: 'edit', label: i18nService.t('Rejected edit to'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`EDIT_FILE ${cmd.arg}: rejected - ${resolved.error}`)
+        needsContinuation = true
+      } else if (state?.readGate?.has(gateKey(resolved.path))) {
+        // Same re-read gate as WRITE_FILE above.
+        const rel = pathRelativeToRoot(resolved.path)
+        notes[i] = `⏭️ ${i18nService.t('Held until the file is re-read')}: EDIT_FILE ${rel}`
+        pushAction({ kind: 'notice', label: i18nService.t('Held until the file is re-read'), target: rel, status: 'failed' })
+        feedback.push(
+          `EDIT_FILE ${rel}: held - your earlier edits to this file kept missing their SEARCH text, ` +
+          `which means your copy of it is stale. Emit "// READ_FILE: ${rel}" first and base the next ` +
+          `change on the content it returns.`
+        )
         needsContinuation = true
       } else {
         pendingEdits.push({ index: i, path: resolved.path, arg: cmd.arg, body: cmd.body ?? '' })
@@ -824,6 +922,12 @@ async function parseAndExecuteFileCommands(
         if (result.success) {
           const rel = pathRelativeToRoot(filePath)
           console.log(`File read: ${filePath}`)
+          // A successful read refreshes the model's copy of the file -
+          // release the re-read gate (an "unchanged" reply counts: the
+          // model now knows its existing copy is current) and reset the
+          // SEARCH-miss streak.
+          state?.readGate?.delete(gateKey(filePath))
+          state?.searchFailStreak?.delete(gateKey(filePath))
           if (state?.readCache?.get(filePath) === result.content
             // An elided earlier result is NOT in history any more -
             // "unchanged" would tell the model to use content it
@@ -842,6 +946,29 @@ async function parseAndExecuteFileCommands(
             notes[i] = `📖 ${i18nService.t('Read file')}: ${rel}`
             pushAction({ kind: 'read', label: i18nService.t('Read file'), target: rel, status: 'ok' })
             feedback.push(`READ_FILE ${rel} result:\n${result.content}`)
+            // Context-pressure advisory: a single read that already
+            // occupies most of num_ctx means the next few reads will
+            // saturate the window (which surfaces as empty replies).
+            // Warn before that happens instead of diagnosing it after.
+            const readContent = result.content ?? ''
+            const numCtx = configService.getOllamaNumCtx() ?? 0
+            const estTokens = Math.ceil(readContent.length / 3)
+            if (numCtx > 0 && estTokens >= numCtx * 0.4 && !state?.largeReadWarned?.has(rel)) {
+              state?.largeReadWarned?.add(rel)
+              const pct = Math.round((estTokens / numCtx) * 100)
+              pushAction({
+                kind: 'notice',
+                label: i18nService.t('Large file - most of the context window'),
+                target: rel,
+                status: 'failed',
+                detail: `~${estTokens} tokens (${pct}% of num_ctx ${numCtx})`,
+              })
+              feedback.push(
+                `NOTE: ${rel} alone is ~${estTokens} tokens - about ${pct}% of the ${numCtx}-token context window. ` +
+                `A few more reads of this size can saturate the context and produce empty replies; ` +
+                `read only what you need next (use GREP to find the relevant part instead of reading whole files).`
+              )
+            }
           }
         } else {
           console.error(`Failed to read file: ${filePath}`, result.error)
@@ -976,6 +1103,15 @@ async function parseAndExecuteFileCommands(
         if (applied.error) {
           batchEditFailed = true
           if (state) state.editFailCount++
+          // Two SEARCH misses in a row on the same file = the model's
+          // copy is stale. Arm the re-read gate so the next WRITE/EDIT
+          // to it is held until it reads the current content.
+          if (state?.searchFailStreak && /SEARCH block #\d+ not found/.test(applied.error)) {
+            const k = gateKey(item.path)
+            const misses = (state.searchFailStreak.get(k) ?? 0) + 1
+            state.searchFailStreak.set(k, misses)
+            if (misses >= 2) state.readGate?.add(k)
+          }
           notes[item.index] = `⚠️ ${i18nService.t('Edit failed for')} ${item.arg}: ${applied.error}`
           pushAction({ kind: 'edit', label: i18nService.t('Edit failed for'), target: item.arg, status: 'failed', detail: applied.error })
           // Weak models recover better from a tiny complete example than
@@ -985,6 +1121,11 @@ async function parseAndExecuteFileCommands(
             `// EDIT_FILE: ${item.arg}\n<<<<<<< SEARCH\n<exact lines to replace>\n=======\n<new lines>\n>>>>>>> REPLACE\n// END_EDIT_FILE`
           if (state && state.editFailCount >= 2) {
             hint += `\nEDIT_FILE has failed ${state.editFailCount} times in a row - stop using it and emit "// WRITE_FILE: ${item.arg}" with the FULL corrected file content instead.`
+          }
+          if (state?.readGate?.has(gateKey(item.path))) {
+            hint += `\nYour SEARCH text has now failed to match ${item.arg} repeatedly - your copy of the file is stale. ` +
+              `Emit "// READ_FILE: ${item.arg}" and rebuild the change from the content it returns; ` +
+              `further writes/edits to this file are held until you read it.`
           }
           feedback.push(`${label} ${item.arg}: failed - ${applied.error}.${hint}`)
           needsContinuation = true
@@ -996,6 +1137,8 @@ async function parseAndExecuteFileCommands(
           // dialog - report it as done so the model moves on and the
           // unresolved-edit tracker is cleared.
           if (state) state.editFailCount = 0
+          state?.searchFailStreak?.delete(gateKey(item.path))
+          state?.readGate?.delete(gateKey(item.path))
           notes[item.index] = `✅ ${i18nService.t('Already applied')}: ${pathRelativeToRoot(item.path)}`
           pushAction({ kind: 'edit', label: i18nService.t('Already applied'), target: pathRelativeToRoot(item.path), status: 'ok' })
           feedback.push(`${label} ${item.arg}: already applied - the replacement text is already in the file; no change needed`)
@@ -1003,6 +1146,8 @@ async function parseAndExecuteFileCommands(
           continue
         }
         if (state) state.editFailCount = 0
+        state?.searchFailStreak?.delete(gateKey(item.path))
+        state?.readGate?.delete(gateKey(item.path))
         // Same fragment guard as WRITE_FILE: an edit result that
         // shrinks the file drastically is likely a truncated REPLACE
         // block deleting more than intended. Block once, let a resend
@@ -1048,6 +1193,46 @@ async function parseAndExecuteFileCommands(
         checkpoint.push({ path: item.path, prevContent: edit.oldContent, existed: item.existed })
         // Go through projectService so the file content cache stays in sync
         await projectService.writeFile(item.path, edit.newContent)
+
+        // Post-write syntax validation: a "successful" write can still be
+        // a fragment that is broken at the language level (the shrink
+        // guard only counts lines). Roll the file back so broken content
+        // never stays on disk, and tell the model to re-emit it valid.
+        const syntax = await validateFileSyntax(item.path, edit.newContent)
+        if (!syntax.ok) {
+          try {
+            if (item.existed) {
+              await projectService.writeFile(item.path, edit.oldContent)
+            } else {
+              const project = projectService.getCurrentProject()
+              if (project?.isOpen) await window.electronAPI.deleteFile(project.rootPath, item.path)
+              projectService.invalidateFile(item.path)
+            }
+          } catch (rbError) {
+            console.error(`Syntax-rollback failed for ${item.path}:`, rbError)
+          }
+          checkpoint.pop()
+          if (item.existed) state?.readCache?.set(item.path, edit.oldContent)
+          else state?.readCache?.delete(item.path)
+          const rollCount = (state?.syntaxRollbacks?.get(gateKey(item.path)) ?? 0) + 1
+          state?.syntaxRollbacks?.set(gateKey(item.path), rollCount)
+          const rel = pathRelativeToRoot(item.path)
+          batchEditFailed = true
+          notes[item.index] = `⚠️ ${i18nService.t('Syntax error - file rolled back')}: ${rel} (${syntax.error})`
+          pushAction({ kind: 'notice', label: i18nService.t('Syntax error - file rolled back'), target: rel, status: 'failed', detail: syntax.error })
+          feedback.push(
+            `${label} ${rel}: written but rolled back - the content has a syntax error (${syntax.error}). ` +
+            `The file was restored to its previous state. Re-emit the corrected content and make sure ` +
+            `the result is syntactically valid.` +
+            (rollCount >= 2
+              ? ` This file's content has now been rolled back ${rollCount} times for syntax errors - check the syntax carefully before emitting.`
+              : '')
+          )
+          needsContinuation = true
+          window.dispatchEvent(new CustomEvent('file-created', { detail: { filePath: item.path } }))
+          continue
+        }
+
         console.log(`File written: ${item.path}`)
         notes[item.index] = item.kind === 'write'
           ? `✅ ${i18nService.t('Wrote file')}: ${pathRelativeToRoot(item.path)}`
@@ -1063,6 +1248,10 @@ async function parseAndExecuteFileCommands(
         if (state) {
           state.editsApplied = (state.editsApplied ?? 0) + 1
           state.modifiedFiles?.add(pathRelativeToRoot(item.path))
+          // A successful write proves the model's copy of the file is
+          // workable - clear the miss streak / re-read gate.
+          state.searchFailStreak?.delete(gateKey(item.path))
+          state.readGate?.delete(gateKey(item.path))
           // The model already knows the new content - it wrote it - so a
           // follow-up READ_FILE can be answered "unchanged" as well.
           state.readCache?.set(item.path, edit.newContent)
@@ -1280,11 +1469,14 @@ async function parseAndExecuteFileCommands(
   if (codeShownNudge) {
     display += `\n\n⚠️ ${i18nService.t('Code shown but not written - asking the model to retry')}`
   }
-  if (deferred) {
+  if (deferred && !stopAtUserBoundary) {
     display += `\n\n⚠️ ${i18nService.t('Deferred to a later response - asking the model to continue now')}`
   }
+  if (stopAtUserBoundary) {
+    display += `\n\n⏹️ ${i18nService.t("Stopped at the model's question - reply to continue")}`
+  }
 
-  return { display: display.trim(), feedback, needsContinuation, checkpoint, actions, blockedInAskMode }
+  return { display: display.trim(), feedback, needsContinuation, checkpoint, actions, blockedInAskMode, stopAtUserBoundary }
 }
 
 // PTY output contains ANSI escape sequences - strip them before
@@ -1370,6 +1562,8 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     const cp = checkpointsRef.current.pop()
     setCanRollback(checkpointsRef.current.length > 0)
     if (!cp || !window.electronAPI) return
+    const cpRoot = projectService.getCurrentProject()?.rootPath
+    if (cpRoot) checkpointService.pop(cpRoot)
     const project = projectService.getCurrentProject()
     for (const f of cp) {
       try {
@@ -1689,6 +1883,29 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     }
   }
 
+  // Restore persisted AI-write checkpoints so the rollback button works
+  // across restarts. Chat remounts on project open (key in App.tsx), so
+  // mount-time load is sufficient; entries pushed this session are newer
+  // and stay at the top of the stack.
+  useEffect(() => {
+    const root = projectService.getCurrentProject()?.rootPath
+    if (!root) return
+    void checkpointService.load(root).then((persisted) => {
+      if (persisted.length === 0) return
+      const rootNorm = root.replace(/\\/g, '/').replace(/\/+$/, '')
+      const restored = persisted.map((b) =>
+        b.files.map((f) => ({
+          path: `${rootNorm}/${f.path}`,
+          prevContent: f.prevContent,
+          existed: f.existed,
+        })),
+      )
+      checkpointsRef.current = [...restored, ...checkpointsRef.current]
+      setCanRollback(checkpointsRef.current.length > 0)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Load the active conversation once on mount: the project's latest
   // conversation, or the last project-less chat when nothing is open.
   useEffect(() => {
@@ -1971,6 +2188,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         unresolvedEdit: false,
         runFailStreak: 0,
         editsApplied: 0,
+        editsAttempted: 0,
         lastRunFailure: null as { command: string; exitCode: number | null; timedOut: boolean; tail: string } | null,
         preEditTestFailure: null as { command: string; tail: string } | null,
         readCache: new Map<string, string>(),
@@ -1979,7 +2197,27 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         lastTurnTruncated: false,
         elidedReads: new Set<string>(),
         shrinkWarned: new Set<string>(),
+        searchFailStreak: new Map<string, number>(),
+        readGate: new Set<string>(),
+        syntaxRollbacks: new Map<string, number>(),
+        largeReadWarned: new Set<string>(),
       }
+      // Stagnation watchdog: a reply that repeats the previous one almost
+      // word-for-word while changing nothing on disk is the loop small
+      // models fall into (context saturation makes it worse). One repeat
+      // gets a warning; the second aborts the run - instructions alone
+      // never break this loop.
+      let prevReplyNorm = ''
+      let stagnantStreak = 0
+      let stagnantAborted = false
+      // The user bounded the run's scope and the model closed on a
+      // permission question - the boundary ended the run (loop-scoped
+      // flag mirrored here so the post-loop summary knows to skip).
+      let boundaryStopped = false
+      // A step whose prompt already exceeds num_ctx gets one warning -
+      // Ollama silently drops the system prompt past the limit, which is
+      // precisely what produces the repetition loop above.
+      let ctxOverflowWarned = false
       // One-shot guard: nudge the model at most once when it declares
       // completion while a failure is still unresolved.
       let failureNudged = false
@@ -2157,19 +2395,55 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         const truncatedByLimit = usage?.doneReason === 'length'
         agentState.lastTurnTruncated = truncatedByLimit
 
-        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly, (acts) => updateStep({ actions: [...acts] }))
+        const editsBefore = agentState.editsApplied ?? 0
+        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode, stopAtUserBoundary } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly, (acts) => updateStep({ actions: [...acts] }))
         if (blockedInAskMode) askModeBlocked = true
         if (controller.signal.aborted) break
         setStreamingText(null)
         if (checkpoint && checkpoint.length > 0) {
           checkpointsRef.current.push(checkpoint)
           setCanRollback(true)
+          const cpRoot = projectService.getCurrentProject()?.rootPath
+          if (cpRoot) checkpointService.push(cpRoot, checkpoint)
         }
         lastStepRanCommands = feedback.length > 0
 
         const stepActions = actions ? [...actions] : []
         if (truncatedByLimit) {
           stepActions.push({ kind: 'notice', label: i18nService.t('Reply cut off at the token limit - asking the model to continue'), target: '', status: 'failed' })
+        }
+
+        // Progress = an applied write/edit or an executed shell command
+        // (reads and feedback alone are not - the observed loop is
+        // "failed edit + same prose" on every step). A repeat reply with
+        // no progress advances the streak.
+        const replyNorm = normReply(response)
+        const madeProgress = (agentState.editsApplied ?? 0) > editsBefore
+          || (actions ?? []).some((a) => a.kind === 'run')
+        const isRepeat = replyNorm.length >= 50 && prevReplyNorm !== ''
+          && replySimilarity(replyNorm, prevReplyNorm) >= 0.8
+        stagnantStreak = !madeProgress && isRepeat ? stagnantStreak + 1 : 0
+        prevReplyNorm = replyNorm
+        if (stagnantStreak >= 2) {
+          stagnantAborted = true
+          stepActions.push({ kind: 'notice', label: i18nService.t('Stopped - the model kept repeating itself with no progress'), target: '', status: 'failed' })
+        } else if (stagnantStreak === 1) {
+          feedback.push(
+            `WARNING - you repeated your previous reply almost word-for-word and changed nothing on disk. ` +
+            `Do not repeat yourself: emit a file command that differs from your last attempt, or tell the user you are stuck and why.`
+          )
+          stepActions.push({ kind: 'notice', label: i18nService.t('Repeated reply with no progress - warning the model'), target: '', status: 'failed' })
+        }
+        // A prompt already larger than num_ctx means Ollama silently
+        // dropped the system prompt for this step - degraded, looping
+        // output is the typical symptom. Surface it once per run.
+        if (!ctxOverflowWarned && numCtxLimit > 0 && (usage?.input ?? 0) > numCtxLimit) {
+          ctxOverflowWarned = true
+          stepActions.push({ kind: 'notice', label: i18nService.t('Prompt larger than num_ctx - model output may degrade'), target: `~${usage!.input} tokens > ${numCtxLimit}`, status: 'failed' })
+          feedback.push(
+            `NOTE: the prompt for this step already exceeded the context window (~${usage!.input} tokens > num_ctx ${numCtxLimit}). ` +
+            `Model output may degrade - prefer short replies and small file commands.`
+          )
         }
 
         const finalText = display || getStreamed()
@@ -2180,6 +2454,18 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         })
 
         historyForRequest.push({ role: 'assistant', content: response, timestamp: Date.now() })
+
+        // The watchdog kills the run outright - no nudge, no closing
+        // summary (a looping model would just narrate a fake one).
+        if (stagnantAborted) break
+
+        // A permission question ending inside a user-scoped run is the
+        // user's stop line, not a deferral - ending here hands the
+        // question back to the user instead of answering it ourselves.
+        if (stopAtUserBoundary) {
+          boundaryStopped = true
+          break
+        }
 
         // No command results the AI needs -> the AI is done. Except: if it
         // declared completion while an earlier command/edit failure is still
@@ -2226,9 +2512,16 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           // instead of ending the run mid-task.
           if (lastStepRanCommands && !summaryAsked) {
             summaryAsked = true
+            // The lead must match the actual outcome - asking for "what
+            // you did" when nothing applied invites the model to report
+            // changes that do not exist on disk.
             currentInput =
-              `The file operations completed. Reply to the user with a brief summary ` +
-              `of what you did, in the same language as the user's request. ` +
+              ((agentState.editsAttempted ?? 0) > 0 && (agentState.editsApplied ?? 0) === 0
+                ? `The file operations FAILED - no change was applied to disk. `
+                : `The file operations completed${agentState.unresolvedEdit ? ', though at least one change was never applied' : ''}. `) +
+              `Reply to the user with a brief summary of what actually happened, ` +
+              `in the same language as the user's request. Do not claim a change ` +
+              `exists on disk unless it was actually applied. ` +
               `Do not emit any file commands.`
             continue
           }
@@ -2277,10 +2570,17 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // balloon anyway. The in-loop summary path already covers the
       // normal finish; this is the exhausted-budget safety net.
       // Continuation is spent, so needsContinuation is ignored here.
-      if (lastStepRanCommands && !controller.signal.aborted) {
+      // Watchdog-aborted and boundary-stopped runs skip this entirely -
+      // the former would narrate a fake success, the latter already
+      // closed on the model's own question to the user.
+      if (lastStepRanCommands && !controller.signal.aborted && !stagnantAborted && !boundaryStopped) {
         const summaryInput =
-          `The file operations completed. Reply to the user with a brief summary ` +
-          `of what you did, in the same language as the user's request. ` +
+          ((agentState.editsAttempted ?? 0) > 0 && (agentState.editsApplied ?? 0) === 0
+            ? `The file operations FAILED - no change was applied to disk. `
+            : `The file operations completed${agentState.unresolvedEdit ? ', though at least one change was never applied' : ''}. `) +
+          `Reply to the user with a brief summary of what actually happened, ` +
+          `in the same language as the user's request. Do not claim a change ` +
+          `exists on disk unless it was actually applied. ` +
           `Do not emit any file commands.`
         historyForRequest.push({ role: 'user', content: summaryInput, timestamp: Date.now() })
         const { onDelta: onSummaryDelta, getStreamed: getSummaryStreamed } = makeStreamHandler()
@@ -2314,6 +2614,29 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // must not stand as an unqualified success - warn that the disk
       // may not match what the model reported.
       warnUnresolvedEdit()
+
+      // Honest endings: the balloons below state disk facts the model's
+      // prose cannot override. A watchdog-killed run says why it stopped;
+      // a run that attempted writes but applied none gets an explicit
+      // "nothing changed" notice (ask-mode blocks are expected, so the
+      // mode's own feedback covers them).
+      if (stagnantAborted) {
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `⏹️ ${i18nService.t('Stopped: the model kept repeating the same reply without changing anything. The context window may be saturated - try a new chat or raise num_ctx in Settings.')}`,
+          timestamp: Date.now(),
+          isError: true,
+        }])
+      } else if ((agentState.editsAttempted ?? 0) > 0
+        && (agentState.editsApplied ?? 0) === 0
+        && !askModeBlocked && !controller.signal.aborted) {
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `⚠️ ${i18nService.t('No file change was applied in this run - completion claims above may not match the disk.')}`,
+          timestamp: Date.now(),
+          isError: true,
+        }])
+      }
 
       // Compact older history into the rolling summary - keeps model
       // input bounded on long chats (fire-and-forget, Settings-gated).

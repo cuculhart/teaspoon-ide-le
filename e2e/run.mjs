@@ -55,10 +55,11 @@ async function waitForServer(timeoutMs = 60000) {
 const mockState = { replies: [], captured: [], delayMs: 0 }
 
 // One assistant message as Ollama's NDJSON stream: a content chunk then a
-// done:true terminator (eval counts mirror real responses).
-const ollamaReply = (text) =>
+// done:true terminator (eval counts mirror real responses). A reply may
+// also be {text, input} to simulate an over-context prompt.
+const ollamaReply = (text, input = 10) =>
   JSON.stringify({ message: { role: 'assistant', content: text }, done: false }) + '\n' +
-  JSON.stringify({ done: true, prompt_eval_count: 10, eval_count: 10 }) + '\n'
+  JSON.stringify({ done: true, prompt_eval_count: input, eval_count: 10 }) + '\n'
 
 // Install the intercepts on a page. Routes survive reloads, so this only
 // needs to run once per launch - before the first reload in launchApp.
@@ -78,12 +79,14 @@ async function installOllamaMock(page) {
     }))
   await page.route('**/api/chat', async (route) => {
     const body = route.request().postData() || ''
-    mockState.captured.push(body)
-    const text = mockState.replies.length ? mockState.replies.shift() : 'E2E_DONE'
+    mockState.captured?.push(body)
+    const entry = mockState.replies.length ? mockState.replies.shift() : 'E2E_DONE'
+    const text = typeof entry === 'string' ? entry : entry.text
+    const input = typeof entry === 'string' ? 10 : (entry.input ?? 10)
     const respond = () => route.fulfill({
       status: 200,
       contentType: 'application/x-ndjson',
-      body: ollamaReply(text),
+      body: ollamaReply(text, input),
     })
     if (mockState.delayMs) setTimeout(respond, mockState.delayMs)
     else await respond()
@@ -142,7 +145,19 @@ async function launchApp({ profileDir, focus = false }) {
     localStorage.removeItem('last_no_project_conv')
     localStorage.setItem('chat_focus', focus ? '1' : '0')
   }, { focus })
-  await page.reload()
+  // A fresh vite server is still optimizing deps when the app first
+  // navigates - the initial page load can still be in-flight here, and
+  // reload() aborts with ERR_ABORTED. Same retry philosophy as the
+  // launch loop above: give vite a moment and retry rather than fail.
+  for (let i = 0; ; i++) {
+    try {
+      await page.reload()
+      break
+    } catch (e) {
+      if (i >= 2 || page.isClosed()) throw e
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+  }
   // Vite can force a full page reload shortly after connect (dependency
   // re-optimization, ws reconnect) - a navigation mid-test destroys the
   // execution context, so wait until the page has been quiet for a bit
@@ -580,6 +595,261 @@ test('R-1  dedup "unchanged" reply is backed by the retained payload', async () 
       texts.slice(0, -1).some((t) => t.includes(payload)),
       'dedup claimed "use what you have" but the payload is gone from history',
     )
+  } finally { await app.close() }
+})
+
+// V-1 (v1.2.0): post-write syntax validation - a write that parses but is
+// syntactically broken must not stay on disk. The file is restored to its
+// previous content and the model is told to re-emit it valid.
+test('V-1  broken JS write is rolled back to previous content', async () => {
+  const tmp = mkTmp('tsp-v1-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'app.js')
+  fs.writeFileSync(target, 'const ok = 1\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// WRITE_FILE: app.js\nconst broken = (\n// END_WRITE_FILE',
+      'V1_DONE',
+    ], reqs)
+    await sendChat(page, 'rewrite app.js')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V1_DONE')
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'const ok = 1\n',
+      'syntactically broken write was left on disk')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('構文エラー'), 'no syntax-rollback notice:\n' + msgs)
+    assert.ok(reqs.some((r) => r.includes('rolled back')),
+      'model was not told the write was rolled back')
+  } finally { await app.close() }
+})
+
+// V-2 (v1.2.0): two consecutive SEARCH misses on the same file arm the
+// re-read gate - further WRITE/EDIT to it is held until a READ_FILE
+// succeeds. The gated write must never reach the approval dialog.
+test('V-2  two SEARCH misses hold writes until READ_FILE', async () => {
+  const tmp = mkTmp('tsp-v2-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'f.js')
+  fs.writeFileSync(target, 'alpha\nbeta\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const badEdit = '// EDIT_FILE: f.js\n<<<<<<< SEARCH\nNOPE_NOT_THERE\n=======\nx\n>>>>>>> REPLACE\n// END_EDIT_FILE'
+    const reqs = []
+    await mockModel(page, [
+      badEdit,                                    // SEARCH miss #1
+      badEdit,                                    // SEARCH miss #2 -> gate
+      '// WRITE_FILE: f.js\nhacked\n// END_WRITE_FILE',  // held (no dialog)
+      '// READ_FILE: f.js',                        // gate released
+      '// WRITE_FILE: f.js\nfixed\n// END_WRITE_FILE',   // reaches approval
+      'V2_DONE',
+    ], reqs)
+    await sendChat(page, 'edit f.js')
+    // The first approval dialog belongs to the LAST write - the held one
+    // must never have opened it.
+    await page.waitForSelector('.file-edit-approval', { timeout: 60000 })
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'alpha\nbeta\n',
+      'file was modified before the gated write was released')
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V2_DONE')
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'fixed\n',
+      'post-read write did not apply')
+    assert.ok(reqs.some((r) => r.includes('held -')),
+      'gate feedback was not sent to the model')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('再読込が完了するまで保留'), 'no held-row in step card:\n' + msgs)
+  } finally { await app.close() }
+})
+
+// V-3 (v1.2.0): checkpoints persist to userData/checkpoints, so the
+// rollback button still restores the file after an app restart.
+test('V-3  rollback works after restart (persistent checkpoints)', async () => {
+  const tmp = mkTmp('tsp-v3-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'keep.js')
+  fs.writeFileSync(target, 'ORIGINAL_KEEP_CONTENT\n')
+  const profile = mkTmp('tsp-prof-')
+  const { app, page, userData } = await launchApp({ profileDir: profile })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// WRITE_FILE: keep.js\nCHANGED_CONTENT\n// END_WRITE_FILE',
+      'V3_DONE',
+    ], reqs)
+    await sendChat(page, 'change keep.js')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V3_DONE')
+    assert.ok(fs.readFileSync(target, 'utf8').includes('CHANGED_CONTENT'),
+      'write did not land')
+    // The checkpoint file lands via a debounced save - poll for it.
+    const cpDir = path.join(userData, 'checkpoints')
+    const deadline = Date.now() + 10000
+    let cpFiles = []
+    while (Date.now() < deadline) {
+      cpFiles = fs.existsSync(cpDir) ? fs.readdirSync(cpDir).filter((n) => n.endsWith('.json')) : []
+      if (cpFiles.length > 0) break
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    assert.ok(cpFiles.length > 0, 'checkpoint file was not persisted')
+  } finally { await app.close() }
+
+  const { app: app2, page: page2 } = await launchApp({ profileDir: profile })
+  try {
+    await openProject(page2, proj)
+    // No model calls needed: the button must come back from disk alone.
+    await page2.waitForSelector('.rollback-button', { timeout: 30000 })
+    await page2.click('.rollback-button')
+    const deadline = Date.now() + 10000
+    while (Date.now() < deadline &&
+           fs.readFileSync(target, 'utf8') !== 'ORIGINAL_KEEP_CONTENT\n') {
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'ORIGINAL_KEEP_CONTENT\n',
+      'rollback after restart did not restore the file')
+  } finally { await app2.close() }
+})
+
+// V-4 (stagnation watchdog): a model that repeats the same reply
+// word-for-word while producing no file change is looping. First repeat
+// warns, second aborts the run with an explicit balloon - the run must
+// NOT silently continue or end in a fake "completion" summary.
+test('V-4  repeated no-progress replies abort the run', async () => {
+  const tmp = mkTmp('tsp-v4-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'f.js')
+  fs.writeFileSync(target, 'alpha\nbeta\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    // Identical reply every step: a failing EDIT plus enough prose for
+    // the similarity check (>50 normalized chars).
+    const repeat =
+      '問題を修正しました。これで期待通りに動作するはずです。\n' +
+      '// EDIT_FILE: f.js\n<<<<<<< SEARCH\nNOPE_NOT_THERE\n=======\nx\n>>>>>>> REPLACE\n// END_EDIT_FILE'
+    const reqs = []
+    await mockModel(page, [repeat, repeat, repeat, 'V4_DONE'], reqs)
+    await sendChat(page, 'fix f.js')
+    await waitForMarker(page, '停止しました')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('モデルが何も変更せず同じ応答を繰り返していました'),
+      'no stagnation abort balloon:\n' + msgs)
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'alpha\nbeta\n',
+      'file changed during a stagnant run')
+    // The watchdog warning must have been fed back to the model before
+    // the abort step.
+    assert.ok(reqs.some((r) => r.includes('repeated your previous reply')),
+      'watchdog warning was never sent to the model')
+    // Bounded cost: abort at the second repeat = at most 3 model calls
+    // (initial + two repeats), never the full step budget.
+    assert.ok(reqs.length <= 3, `expected <=3 model calls, got ${reqs.length}`)
+  } finally { await app.close() }
+})
+
+// V-5 (honest ending): a run where every write/edit fails must end with a
+// system balloon stating that nothing was applied - the model's own
+// "done" prose cannot stand as the only account of disk state.
+test('V-5  zero-change run ends with an explicit nothing-applied notice', async () => {
+  const tmp = mkTmp('tsp-v5-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'f.js')
+  fs.writeFileSync(target, 'alpha\nbeta\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const badEdit = '// EDIT_FILE: f.js\n<<<<<<< SEARCH\nNOPE_NOT_THERE\n=======\nx\n>>>>>>> REPLACE\n// END_EDIT_FILE'
+    await mockModel(page, [
+      badEdit,
+      '修正が完了しました。すべて期待通りです。',
+      'はい、問題ありません。',
+      'V5_DONE',
+    ])
+    await sendChat(page, 'fix f.js')
+    await waitForMarker(page, '1件も適用されませんでした')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('このランではファイルへの変更は1件も適用されませんでした'),
+      'no zero-change disclosure:\n' + msgs)
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'alpha\nbeta\n')
+  } finally { await app.close() }
+})
+
+// V-6 (num_ctx overflow notice): a prompt that already exceeds num_ctx
+// degrades the model silently - the step card must say so once.
+test('V-6  over-context prompt is flagged on the step card', async () => {
+  const tmp = mkTmp('tsp-v6-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    // prompt_eval_count 9000 > default num_ctx 8192.
+    await mockModel(page, [{ text: 'V6_DONE', input: 9000 }])
+    await sendChat(page, 'hello')
+    await waitForMarker(page, 'V6_DONE')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('プロンプトがnum_ctxを超過'),
+      'no num_ctx overflow notice:\n' + msgs)
+  } finally { await app.close() }
+})
+
+// V-7 (user-scoped stop): when the user bounds the run ("step 1 only,
+// stop"), a reply ending with a permission question is a stop line -
+// the run must NOT auto-continue past it even though commands ran.
+test('V-7  permission question ends a user-scoped run', async () => {
+  const tmp = mkTmp('tsp-v7-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'f.js'), 'alpha\nbeta\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      // A command runs (feedback would normally force continuation) but
+      // the reply ends asking permission.
+      '// READ_FILE: f.js\n\nステップ1が完了しました。次のステップに進んでよろしいでしょうか？',
+      'V7_DONE',
+    ], reqs)
+    await sendChat(page, 'ステップ1のみ実装して、停止してください')
+    await waitForMarker(page, 'よろしいでしょうか')
+    // Give a continuation (if any) a moment to fire.
+    await new Promise((r) => setTimeout(r, 3000))
+    assert.strictEqual(reqs.length, 1,
+      `run continued past the user's stop boundary (${reqs.length} calls)`)
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('モデルの質問で停止'), 'no boundary-stop notice:\n' + msgs)
+  } finally { await app.close() }
+})
+
+// V-8 (regression): the SAME permission-question reply must still
+// auto-continue when the user gave no scope boundary - the existing
+// "don't stall waiting for the user" behavior is unchanged.
+test('V-8  permission question without a scope still continues', async () => {
+  const tmp = mkTmp('tsp-v8-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'f.js'), 'alpha\nbeta\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// READ_FILE: f.js\n\nステップ1が完了しました。次のステップに進んでよろしいでしょうか？',
+      'V8_DONE',
+    ], reqs)
+    await sendChat(page, 'make the whole game')
+    await waitForMarker(page, 'V8_DONE')
+    assert.ok(reqs.length >= 2, `run stalled at the question (${reqs.length} calls)`)
   } finally { await app.close() }
 })
 

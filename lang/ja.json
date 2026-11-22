@@ -475,5 +475,16 @@
   "Retry in code mode": "コードモードで再試行",
   "This edit drastically shrinks the file": "この変更はファイルを大幅に縮小します",
   "Large block - asking the model to split future work": "大きなブロック - モデルに分割を指示しています",
-  "Possibly undefined function call": "未定義の関数呼び出しの可能性"
+  "Possibly undefined function call": "未定義の関数呼び出しの可能性",
+  "Held until the file is re-read": "再読込が完了するまで保留",
+  "Syntax error - file rolled back": "構文エラーのため変更前の状態に戻しました",
+  "Large file - most of the context window": "大きなファイル - コンテキストの大部分を占有",
+  "This model is easier to drive with a larger context window ({n} recommended).": "このモデルはコンテキストウィンドウを大きくすると安定します（推奨: {n}）",
+  "Set to recommended value": "推奨値に設定",
+  "Repeated reply with no progress - warning the model": "進展のない同じ応答の繰返し - モデルに警告",
+  "Stopped - the model kept repeating itself with no progress": "停止 - モデルが進展なく同じ応答を繰り返しました",
+  "Prompt larger than num_ctx - model output may degrade": "プロンプトがnum_ctxを超過 - モデル出力が劣化している可能性",
+  "Stopped: the model kept repeating the same reply without changing anything. The context window may be saturated - try a new chat or raise num_ctx in Settings.": "停止しました: モデルが何も変更せず同じ応答を繰り返していました。コンテキストウィンドウが飽和している可能性があります - 新しいチャットを始めるか、設定でnum_ctxを引き上げてください。",
+  "No file change was applied in this run - completion claims above may not match the disk.": "このランではファイルへの変更は1件も適用されませんでした - 上の完了報告はディスクの実態と一致しない可能性があります。",
+  "Stopped at the model's question - reply to continue": "モデルの質問で停止 - 回答すると続行できます"
 }

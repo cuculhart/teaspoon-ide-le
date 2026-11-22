@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { configService, ThemeMode, ContextMode } from '../services/configService'
 import { ollamaService } from '../services/ollamaService'
+import { recommendedNumCtxForModel } from '../services/modelGuide'
 import { themeService } from '../services/themeService'
 import { chatHistoryService } from '../services/chatHistoryService'
 import { useT } from '../services/i18nService'
@@ -420,6 +421,30 @@ const Settings: React.FC<SettingsProps> = ({ onClose }) => {
                 />
               )}
             </div>
+
+            {(() => {
+              // Recommended-context guide: only for known models, and only
+              // when the current setting is below the recommendation.
+              const recommended = recommendedNumCtxForModel(ollamaModel)
+              if (!recommended) return null
+              const current = parseInt(ollamaNumCtx || '', 10)
+              const effective = Number.isFinite(current) && current > 0 ? current : 8192
+              if (effective >= recommended) return null
+              return (
+                <p className="setting-description">
+                  {t('This model is easier to drive with a larger context window ({n} recommended).')
+                    .replace('{n}', String(recommended))}
+                  {' '}
+                  <button
+                    type="button"
+                    className="ctx-guide-button"
+                    onClick={() => handleOllamaNumCtxChange(String(recommended))}
+                  >
+                    {t('Set to recommended value')}
+                  </button>
+                </p>
+              )
+            })()}
 
             <div className="appearance-row">
               <label htmlFor="ollama-num-thread">{t('CPU Threads')}</label>
