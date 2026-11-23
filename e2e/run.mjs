@@ -1162,6 +1162,65 @@ test('V-17 SEARCH-less EDIT steers to WRITE_FILE at once', async () => {
   } finally { await app.close() }
 })
 
+// V-18 (v1.3.0 real-run fix): a WRITE_FILE truncated at the token limit
+// parses as nothing - it never reached the file, but it IS a failed
+// attempt on that path. Counting it toward the repeated-failure gate
+// stops the "resend the same oversized block" loop (observed: the model
+// re-emitted the identical ~300-line write twice despite the split
+// guidance) by escalating to the user.
+test('V-18 truncated writes count toward the failure gate', async () => {
+  const tmp = mkTmp('tsp-v18-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'f.js')
+  fs.writeFileSync(target, 'const a = 1\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    // A dangling opener with no terminator - the shape a token-limit
+    // cut actually leaves behind.
+    const truncated = '// WRITE_FILE: f.js\nconst a = 2\nconst b = 3\n'
+    const reqs = []
+    await mockModel(page, [truncated, truncated, truncated, 'V18_DONE'], reqs)
+    await sendChat(page, 'rewrite f.js')
+    await page.waitForSelector('.process-approval', { timeout: 60000 })
+    await page.click('.process-approval .approval-actions button >> nth=3')
+    await waitForMarker(page, 'V18_DONE')
+    assert.ok(reqs.some((r) => r.includes('chose to SKIP')),
+      'model was not told the item was skipped')
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'const a = 1\n',
+      'a truncated write reached the file')
+  } finally { await app.close() }
+})
+
+// V-19 (v1.3.0 real-run fix): a model that applies verified changes but
+// never flips the plan's checkboxes (observed: a whole run of applied
+// edits with every "- [ ]" left untouched) gets a standing reminder
+// inside the digest until the marks move.
+test('V-19 digest reminds to mark verified items', async () => {
+  const tmp = mkTmp('tsp-v19-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'), '# Plan\n- [ ] 1. change f.js\n')
+  fs.writeFileSync(path.join(proj, 'f.js'), 'const a = 1\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// WRITE_FILE: f.js\nconst a = 2\n// END_WRITE_FILE',
+      'V19_DONE',
+    ], reqs)
+    await sendChat(page, 'change f.js')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V19_DONE')
+    const body = reqs[1].replace(/\\"/g, '"')
+    assert.ok(body.includes('mark the matching items "- [x]"'),
+      'verified-change reminder missing from digest:\n' + body.slice(0, 400))
+  } finally { await app.close() }
+})
+
 // ---------- runner ----------
 
 async function main() {

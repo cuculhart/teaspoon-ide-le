@@ -19,7 +19,7 @@ import { checkpointService } from '../services/checkpointService'
 import { validateFileSyntax } from '../services/syntaxValidator'
 import {
   isPlanFileName, formatPlanDigest, newlyCheckedItems, itemFileRefs,
-  refMatchesPath, justCompletedPhase, normPlanItemText,
+  refMatchesPath, justCompletedPhase, normPlanItemText, parsePlanItems,
 } from '../services/planTracker'
 import { renderMarkdown, MARKDOWN_CSS } from '../utils/markdown'
 import './Chat.css'
@@ -582,6 +582,7 @@ async function parseAndExecuteFileCommands(
   // truncated script.js block).
   const malformedBlocks: string[] = []
   const malformedDetails: string[] = []
+  const malformedArgs: string[] = []
   // For each dangling opener, extract the target path and the tail of the
   // partial body. Without this the model rewrites the file from memory
   // and silently drops whatever it hadn't emitted yet (e.g. helper
@@ -592,6 +593,7 @@ async function parseAndExecuteFileCommands(
     while ((m = re.exec(scanText)) !== null) {
       malformedBlocks.push(name)
       const arg = m[1].trim() || '<unknown>'
+      malformedArgs.push(arg)
       const rest = scanText.slice(m.index + m[0].length)
       const bodyLines = rest.split('\n').filter(l => l.trim().length > 0)
       const tail = bodyLines.slice(-8).map(l => l.trimEnd()).join('\n')
@@ -796,6 +798,16 @@ async function parseAndExecuteFileCommands(
     )
     pushAction({ kind: 'notice', label: i18nService.t('Incomplete command block - asking the model to retry'), target: '', status: 'failed' })
     needsContinuation = true
+    // A dangling write/edit is a failed attempt on that path - count it
+    // toward the repeated-failure gate. Token-limit resends of the same
+    // oversized block reliably truncate again (observed on a real run:
+    // the model re-emitted the identical ~300-line WRITE_FILE twice in a
+    // row despite the split guidance), so the loop needs the user, not
+    // another blind retry.
+    for (const arg of malformedArgs) {
+      const r = resolveFilePath(arg)
+      if (r.path) await notePathFailure(r.path)
+    }
   }
   if (inventedCmds.length > 0) {
     feedback.push(
@@ -2586,7 +2598,18 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             agentState.planPath = null
             return ''
           }
-          return formatPlanDigest(pathRelativeToRoot(agentState.planPath), res.content ?? '')
+          const rel = pathRelativeToRoot(agentState.planPath)
+          let section = formatPlanDigest(rel, res.content ?? '')
+          // Verified changes exist but every checkbox is still open: keep
+          // a standing reminder inside the digest until the marks move.
+          // The instruction-only version is reliably ignored (observed:
+          // a run that declared all items done in prose while the file
+          // kept every "- [ ]" - the phase gate then has nothing to see).
+          if (section && (agentState.verifiedFiles?.size ?? 0) > 0
+            && parsePlanItems(res.content ?? '').some(i => !i.checked)) {
+            section += `Verified changes exist in this run (${agentState.verifiedFiles!.size} file(s)) - mark the matching items "- [x]" in ${rel} once the change for them is confirmed on disk.\n`
+          }
+          return section
         } catch {
           return ''
         }
