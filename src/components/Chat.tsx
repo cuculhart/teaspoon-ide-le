@@ -1266,6 +1266,13 @@ async function parseAndExecuteFileCommands(
           // (a full-file rewrite is easier for them than diff syntax).
           let hint = ` A complete EDIT_FILE looks like this:\n` +
             `// EDIT_FILE: ${item.arg}\n<<<<<<< SEARCH\n<exact lines to replace>\n=======\n<new lines>\n>>>>>>> REPLACE\n// END_EDIT_FILE`
+          // "No SEARCH blocks" means the model emitted the new content
+          // directly - a full-rewrite intent funneled into EDIT_FILE
+          // (observed on a real run). Steer to WRITE_FILE immediately
+          // rather than waiting for the repeated-failure steer.
+          if (/no SEARCH\/REPLACE blocks/.test(applied.error)) {
+            hint += `\nIf you meant to rewrite the WHOLE file, emit "// WRITE_FILE: ${item.arg}" followed by the complete new content - EDIT_FILE only works with SEARCH/REPLACE blocks.`
+          }
           if (state && state.editFailCount >= 2) {
             hint += `\nEDIT_FILE has failed ${state.editFailCount} times in a row - stop using it and emit "// WRITE_FILE: ${item.arg}" with the FULL corrected file content instead.`
           }

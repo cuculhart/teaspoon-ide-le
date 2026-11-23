@@ -1136,6 +1136,32 @@ test('V-16 checkbox-less plan injects a format hint', async () => {
   } finally { await app.close() }
 })
 
+// V-17 (v1.3.0 real-run fix): an EDIT_FILE whose body contains no
+// SEARCH/REPLACE blocks at all is a full-rewrite intent funneled into
+// the wrong command - the feedback steers to WRITE_FILE immediately,
+// not after the generic two-failure threshold.
+test('V-17 SEARCH-less EDIT steers to WRITE_FILE at once', async () => {
+  const tmp = mkTmp('tsp-v17-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'f.js'), 'const a = 1\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// EDIT_FILE: f.js\nconst a = 2\n// END_EDIT_FILE',  // no SEARCH blocks
+      'V17_DONE',
+    ], reqs)
+    await sendChat(page, 'rewrite f.js')
+    // SEARCH-less EDIT_FILE errors before approval - no dialog appears;
+    // the failure feedback goes straight into the next request.
+    await waitForMarker(page, 'V17_DONE')
+    assert.ok(reqs.some((r) => r.includes('rewrite the WHOLE file')),
+      'no immediate WRITE_FILE steer for a SEARCH-less EDIT_FILE')
+  } finally { await app.close() }
+})
+
 // ---------- runner ----------
 
 async function main() {
