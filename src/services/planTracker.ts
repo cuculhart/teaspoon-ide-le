@@ -168,7 +168,13 @@ export function formatPlanDigest(
   maxChars = 1200,
 ): string {
   const items = parsePlanItems(content)
-  if (items.length === 0) return ''
+  if (items.length === 0) {
+    // A plan file without checkbox items cannot be tracked - say so and
+    // nudge the recommended format. Prose plans (headings + numbered
+    // lists) still count as "found": the file exists, just untrackable.
+    return `[PLAN] ${relPath} - found, but it has no "- [ ]" checkbox items, so progress cannot be tracked. ` +
+      `Recommended format: one "- [ ] task" line per work item ("- [x]" only when the change is verified on disk).\n`
+  }
   const done = items.filter(i => i.checked).length
   const header = `[PLAN] ${relPath} - ${done} of ${items.length} items done. Open items:`
   const lines: string[] = [header]

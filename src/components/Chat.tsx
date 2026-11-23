@@ -1254,7 +1254,10 @@ async function parseAndExecuteFileCommands(
             const k = gateKey(item.path)
             const misses = (state.searchFailStreak.get(k) ?? 0) + 1
             state.searchFailStreak.set(k, misses)
-            if (misses >= 2) state.readGate?.add(k)
+            // Plan files gate at the first miss: the model only has the
+            // compressed digest, so a miss here is almost certainly a
+            // stale-copy edit rather than bad luck.
+            if (misses >= (isPlanFileName(item.path) ? 1 : 2)) state.readGate?.add(k)
           }
           notes[item.index] = `⚠️ ${i18nService.t('Edit failed for')} ${item.arg}: ${applied.error}`
           pushAction({ kind: 'edit', label: i18nService.t('Edit failed for'), target: item.arg, status: 'failed', detail: applied.error })
@@ -2557,11 +2560,25 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         if (!agentState.planPath && !agentState.planScanDone) {
           agentState.planScanDone = true
           agentState.planPath = await detectPlanFile(project.rootPath)
+          // An existing plan file is seen as a compressed digest, not
+          // verbatim content - a WRITE/EDIT without a fresh read is
+          // almost guaranteed to miss its SEARCH text (observed on real
+          // runs: the model edits the plan "from the digest" and fails).
+          // Arm the re-read gate pre-emptively; one READ_FILE releases
+          // it for the rest of the run.
+          if (agentState.planPath) agentState.readGate?.add(gateKey(agentState.planPath))
         }
         if (!agentState.planPath) return ''
         try {
           const res = await window.electronAPI.readFile(agentState.planPath)
-          if (!res.success) { agentState.planPath = null; return '' }
+          if (!res.success) {
+            // Plan file gone (deleted externally / never committed) -
+            // release the pre-armed gate so it cannot deadlock a WRITE
+            // that recreates it.
+            agentState.readGate?.delete(gateKey(agentState.planPath))
+            agentState.planPath = null
+            return ''
+          }
           return formatPlanDigest(pathRelativeToRoot(agentState.planPath), res.content ?? '')
         } catch {
           return ''

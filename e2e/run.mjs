@@ -941,6 +941,9 @@ test('V-11 unverified completion mark warns the model', async () => {
     await openProject(page, proj)
     const reqs = []
     await mockModel(page, [
+      // The plan file sits behind the re-read gate (V-15) - a READ is
+      // required before its first edit.
+      '// READ_FILE: develop-plan.md',
       '// EDIT_FILE: develop-plan.md\n<<<<<<< SEARCH\n- [ ] 1. fix script.js\n=======\n- [x] 1. fix script.js\n>>>>>>> REPLACE\n// END_EDIT_FILE',
       'V11_DONE',
     ], reqs)
@@ -973,6 +976,7 @@ test('V-12 completion mark after a verified change does not warn', async () => {
     await openProject(page, proj)
     const reqs = []
     await mockModel(page, [
+      '// READ_FILE: develop-plan.md',
       '// WRITE_FILE: script.js\nconst a = 2\n// END_WRITE_FILE\n' +
       '// EDIT_FILE: develop-plan.md\n<<<<<<< SEARCH\n- [ ] 1. fix script.js\n=======\n- [x] 1. fix script.js\n>>>>>>> REPLACE\n// END_EDIT_FILE',
       'V12_DONE',
@@ -1003,6 +1007,7 @@ test('V-13 completed plan phase prompts for the transition', async () => {
     await openProject(page, proj)
     const reqs = []
     await mockModel(page, [
+      '// READ_FILE: develop-plan.md',
       '// EDIT_FILE: develop-plan.md\n' +
       '<<<<<<< SEARCH\n- [ ] 1. setup\n  - [ ] 1.1 sub task\n=======\n' +
       '- [x] 1. setup\n  - [x] 1.1 sub task\n>>>>>>> REPLACE\n// END_EDIT_FILE\n' +
@@ -1060,6 +1065,74 @@ test('V-14 repeated failures ask the user; skip blocks the path', async () => {
       'skipped write reached the approval dialog')
     assert.strictEqual(fs.readFileSync(target, 'utf8'), 'alpha\nbeta\n',
       'skipped path was modified')
+  } finally { await app.close() }
+})
+
+// V-15 (v1.3.0 real-run fix): the digest gives the model a compressed
+// view of the plan file, not verbatim text - an EDIT to it without a
+// fresh READ is near-guaranteed to miss its SEARCH (observed on a real
+// gemma4 run). The plan file is therefore held behind the re-read gate
+// from the start: the first edit attempt bounces with "read it first",
+// a READ_FILE releases the gate, and the next edit applies.
+test('V-15 plan file edit is held until READ_FILE', async () => {
+  const tmp = mkTmp('tsp-v15-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const planPath = path.join(proj, 'develop-plan.md')
+  fs.writeFileSync(planPath, '# Plan\n- [ ] 1. fix script.js\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const markDone =
+      '// EDIT_FILE: develop-plan.md\n<<<<<<< SEARCH\n- [ ] 1. fix script.js\n=======\n- [x] 1. fix script.js\n>>>>>>> REPLACE\n// END_EDIT_FILE'
+    const reqs = []
+    await mockModel(page, [
+      markDone,                          // held - never reaches approval
+      '// READ_FILE: develop-plan.md',   // gate release
+      markDone,                          // now reaches the dialog
+      'V15_DONE',
+    ], reqs)
+    await sendChat(page, 'mark the plan item done')
+    // First approval dialog belongs to the post-READ edit attempt.
+    await page.waitForSelector('.file-edit-approval', { timeout: 60000 })
+    assert.strictEqual(fs.readFileSync(planPath, 'utf8'),
+      '# Plan\n- [ ] 1. fix script.js\n',
+      'plan file changed before the re-read gate released')
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V15_DONE')
+    assert.ok(reqs.some((r) => r.includes('held -')),
+      'held feedback was not sent to the model')
+    assert.ok(fs.readFileSync(planPath, 'utf8').includes('- [x]'),
+      'post-read edit did not apply')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('再読込が完了するまで保留'),
+      'no held-row in step card:\n' + msgs)
+  } finally { await app.close() }
+})
+
+// V-16 (v1.3.0 real-run fix): a plan file without checkbox items cannot
+// be tracked - the digest says so and nudges the recommended format
+// instead of silently injecting nothing.
+test('V-16 checkbox-less plan injects a format hint', async () => {
+  const tmp = mkTmp('tsp-v16-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  // Numbered lines parse as trackable items, so the untrackable case is
+  // a purely-prose plan with no list items at all.
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'),
+    '# Plan\nBuild the game as discussed in chat.\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, ['V16_DONE'], reqs)
+    await sendChat(page, 'hello')
+    await waitForMarker(page, 'V16_DONE')
+    assert.ok(reqs[0].includes('[PLAN]'), `no plan section in request:\n${reqs[0]}`)
+    // reqs are raw request bodies - " appears JSON-escaped as \".
+    const body = reqs[0].replace(/\\"/g, '"')
+    assert.ok(body.includes('no "- [ ]" checkbox items'),
+      'untrackable-format hint missing from digest:\n' + body.slice(0, 400))
   } finally { await app.close() }
 })
 
