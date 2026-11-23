@@ -8,6 +8,7 @@ import { contextService } from '../services/contextService'
 import { chatHistoryService, ConversationMeta } from '../services/chatHistoryService'
 import FileEditApproval, { FileEdit } from './FileEditApproval'
 import CommandApproval from './CommandApproval'
+import ProcessApproval, { ProcessPrompt } from './ProcessApproval'
 import CreateProjectModal from './CreateProjectModal'
 import { i18nService, useT } from '../services/i18nService'
 import { findFileCommands } from '../services/commandParser'
@@ -16,6 +17,10 @@ import type { AgentAction } from '../types/agent'
 import { commandResultVerdict, formatStateDigest, TEST_COMMAND_RE } from '../services/toolFeedback'
 import { checkpointService } from '../services/checkpointService'
 import { validateFileSyntax } from '../services/syntaxValidator'
+import {
+  isPlanFileName, formatPlanDigest, newlyCheckedItems, itemFileRefs,
+  refMatchesPath, justCompletedPhase, normPlanItemText,
+} from '../services/planTracker'
 import { renderMarkdown, MARKDOWN_CSS } from '../utils/markdown'
 import './Chat.css'
 
@@ -211,6 +216,33 @@ function pathRelativeToRoot(absPath: string): string {
   return root && norm.toLowerCase().startsWith(root.toLowerCase() + '/')
     ? norm.slice(root.length + 1)
     : norm
+}
+
+// Locate the project's plan file (L2): root-level candidates from the
+// directory listing first, then a name search for nested ones. Returns
+// the resolved absolute path (forward slashes), or null when the
+// project has no plan file.
+async function detectPlanFile(rootPath: string): Promise<string | null> {
+  if (!window.electronAPI) return null
+  const root = rootPath.replace(/\\/g, '/').replace(/\/+$/, '')
+  try {
+    const res = await window.electronAPI.readDirectory(rootPath)
+    if (res.success && res.items) {
+      const hit = res.items.find(i => !i.isDirectory && isPlanFileName(i.name))
+      if (hit) return hit.path.replace(/\\/g, '/')
+    }
+    // Substring search covers both "*-plan.md" / "plan.md" and "todo.md"
+    // in subdirectories; isPlanFileName filters lookalikes (myplan.md).
+    for (const pat of ['plan.md', 'todo.md']) {
+      const ff = await window.electronAPI.findFiles(root, pat, 20)
+      const cands = (ff.files ?? []).filter(isPlanFileName)
+      if (ff.success && cands.length > 0) {
+        cands.sort((a, b) => a.length - b.length)
+        return `${root}/${cands[0]}`
+      }
+    }
+  } catch { /* detection is advisory - a failure just means no plan */ }
+  return null
 }
 
 // The user asked for a bare file name ("index.html") but the model targets a
@@ -418,6 +450,9 @@ async function parseAndExecuteFileCommands(
   runCommandAndWait: (command: string) => Promise<RunResult>,
   userText: string,
   requestProject?: () => Promise<string | null>,
+  // Process-approval prompts (L5): phase transitions and repeated-
+  // failure decisions ask the user about the approach, not a diff.
+  requestProcessApproval?: (prompt: ProcessPrompt) => Promise<string | null>,
   state?: {
     editFailCount: number
     unresolvedFailure: boolean
@@ -478,6 +513,26 @@ async function parseAndExecuteFileCommands(
     // Paths already warned about for context-heavy READ_FILE results
     // (one advisory per file per run is enough).
     largeReadWarned?: Set<string>
+    // Plan-file driven mode (L2). planPath: detected/written plan file
+    // (absolute); planScanDone: detection ran already this run.
+    planPath?: string | null
+    planScanDone?: boolean
+    // Files whose latest applied change passed every check the harness
+    // runs (applied + syntax OK + no missing-callee note). A "- [x]"
+    // plan mark is trusted only when it maps to one of these.
+    verifiedFiles?: Set<string>
+    // Plan items already warned about for an unverified "- [x]".
+    planWarnedItems?: Set<string>
+    // Phase keys ("file:title") whose transition was already gated.
+    phaseGatesFired?: Set<string>
+    // A plan phase just completed - the agent loop consumes this and
+    // asks the user before the next phase starts.
+    phaseGate?: { file: string; done: string; next: string } | null
+    // Consecutive write/edit/validation failures per resolved path -
+    // at the threshold the user picks continue/change-approach/skip.
+    pathFailStreak?: Map<string, number>
+    // Paths the user chose to skip - further writes/edits bounce back.
+    pathSkipped?: Set<string>
   },
   // Ask (read-only) mode: WRITE_FILE/EDIT_FILE/RUN_COMMAND/CLOSE_PROJECT
   // are blocked before any approval prompt or disk/shell access.
@@ -673,6 +728,47 @@ async function parseAndExecuteFileCommands(
   const checkpoint: { path: string; prevContent: string; existed: boolean }[] = []
   let needsContinuation = false
 
+  // Repeated-failure process gate (L5): the same file failing its
+  // write/edit/validation over and over means the model is stuck on
+  // this item - the failure loop cannot fix itself. The user decides:
+  // keep trying, change approach, or skip the item.
+  const notePathFailure = async (absPath: string) => {
+    if (!state) return
+    const k = gateKey(absPath)
+    const n = (state.pathFailStreak?.get(k) ?? 0) + 1
+    state.pathFailStreak?.set(k, n)
+    if (n < 3 || !requestProcessApproval) return
+    state.pathFailStreak?.set(k, 0)
+    const rel = pathRelativeToRoot(absPath)
+    const choice = await requestProcessApproval({
+      title: i18nService.t('Repeated failure'),
+      body: i18nService.t('Changes to "{path}" have failed {count} times in a row. How should the work proceed?')
+        .replace('{path}', rel).replace('{count}', String(n)),
+      options: [
+        { id: 'continue', label: i18nService.t('Keep trying') },
+        { id: 'approach', label: i18nService.t('Change approach') },
+        { id: 'skip', label: i18nService.t('Skip this item') },
+      ],
+      note: approvalNote || null,
+    })
+    if (choice === 'skip') {
+      state.pathSkipped?.add(k)
+      pushAction({ kind: 'notice', label: i18nService.t('Skipped at user request'), target: rel, status: 'rejected' })
+      feedback.push(
+        `NOTE: the user chose to SKIP work on ${rel} - do not emit further WRITE_FILE/EDIT_FILE for it. ` +
+        `Move on to other items, or report this one as skipped in your final answer.`
+      )
+    } else if (choice === 'approach') {
+      feedback.push(
+        `NOTE: the user asked you to CHANGE APPROACH on ${rel}. Do not repeat the same edit - ` +
+        `try a different method (a different SEARCH anchor, a short WRITE_FILE rewrite, or a different fix entirely).`
+      )
+    } else {
+      // 'continue' - and a dismissed dialog - both mean keep going.
+      feedback.push(`NOTE: the user chose to continue - keep working on ${rel}.`)
+    }
+  }
+
   // No project open but the model wants to write files: offer to create
   // a project folder instead of rejecting every command. When the user
   // creates one, path resolution below picks it up via projectService.
@@ -797,6 +893,17 @@ async function parseAndExecuteFileCommands(
         pushAction({ kind: 'write', label: i18nService.t('Rejected write to'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`WRITE_FILE ${cmd.arg}: rejected - ${resolved.error}`)
         needsContinuation = true
+      } else if (state?.pathSkipped?.has(gateKey(resolved.path))) {
+        // The user chose "skip" on this item at the repeated-failure
+        // gate - bounce further writes to it back to the model.
+        const rel = pathRelativeToRoot(resolved.path)
+        notes[i] = `⏭️ ${i18nService.t('Skipped at user request')}: WRITE_FILE ${rel}`
+        pushAction({ kind: 'notice', label: i18nService.t('Skipped at user request'), target: rel, status: 'rejected' })
+        feedback.push(
+          `WRITE_FILE ${rel}: rejected - the user chose to skip this item. ` +
+          `Do not emit further writes/edits to it; move on to other work or report it as skipped.`
+        )
+        needsContinuation = true
       } else if (state?.readGate?.has(gateKey(resolved.path))) {
         // Re-read gate: repeated SEARCH misses mean the model's copy of
         // this file is stale. Hold every write/edit to it until a
@@ -832,6 +939,16 @@ async function parseAndExecuteFileCommands(
         notes[i] = `⚠️ ${i18nService.t('Rejected edit to')} ${cmd.arg}: ${resolved.error}`
         pushAction({ kind: 'edit', label: i18nService.t('Rejected edit to'), target: cmd.arg, status: 'failed', detail: resolved.error })
         feedback.push(`EDIT_FILE ${cmd.arg}: rejected - ${resolved.error}`)
+        needsContinuation = true
+      } else if (state?.pathSkipped?.has(gateKey(resolved.path))) {
+        // Same user-skip gate as WRITE_FILE above.
+        const rel = pathRelativeToRoot(resolved.path)
+        notes[i] = `⏭️ ${i18nService.t('Skipped at user request')}: EDIT_FILE ${rel}`
+        pushAction({ kind: 'notice', label: i18nService.t('Skipped at user request'), target: rel, status: 'rejected' })
+        feedback.push(
+          `EDIT_FILE ${rel}: rejected - the user chose to skip this item. ` +
+          `Do not emit further writes/edits to it; move on to other work or report it as skipped.`
+        )
         needsContinuation = true
       } else if (state?.readGate?.has(gateKey(resolved.path))) {
         // Same re-read gate as WRITE_FILE above.
@@ -944,6 +1061,10 @@ async function parseAndExecuteFileCommands(
           // SEARCH-miss streak.
           state?.readGate?.delete(gateKey(filePath))
           state?.searchFailStreak?.delete(gateKey(filePath))
+          // Deliberately NOT clearing pathFailStreak: a miss -> re-read
+          // -> miss cycle is exactly the stuck loop the repeated-
+          // failure prompt exists for, and the re-read gate already
+          // forgives the stale-copy mistakes it was meant to fix.
           if (state?.readCache?.get(filePath) === result.content
             // An elided earlier result is NOT in history any more -
             // "unchanged" would tell the model to use content it
@@ -1053,6 +1174,10 @@ async function parseAndExecuteFileCommands(
     // write/edit stays outstanding until a later write/edit succeeds.
     let batchEditFailed = false
     let batchEditSucceeded = false
+    // Plan-file writes/edits that landed this batch - their checkbox
+    // transitions are audited AFTER the batch so same-turn verified
+    // changes count toward the items they claim to finish.
+    const appliedPlanEdits: { rel: string; old: string; new: string }[] = []
 
     for (const item of items) {
       const label = item.kind === 'write' ? 'WRITE_FILE' : 'EDIT_FILE'
@@ -1081,6 +1206,7 @@ async function parseAndExecuteFileCommands(
             `re-emit it with just the file content, no diff syntax.`
           )
           needsContinuation = true
+          await notePathFailure(item.path)
           continue
         }
         // A WRITE_FILE that would shrink an existing file drastically is
@@ -1101,6 +1227,7 @@ async function parseAndExecuteFileCommands(
             `If you meant to change only part of the file, use EDIT_FILE instead.`
           )
           needsContinuation = true
+          await notePathFailure(item.path)
           continue
         }
         const edit: FileEdit = { filePath: item.path, oldContent, newContent: item.body }
@@ -1113,6 +1240,7 @@ async function parseAndExecuteFileCommands(
           pushAction({ kind: 'edit', label: i18nService.t('Cannot edit'), target: item.arg, status: 'failed', detail: i18nService.t('file not found or unreadable') })
           feedback.push(`${label} ${item.arg}: failed - file not found or unreadable. If you intended to create it, use // WRITE_FILE: with the full content instead.`)
           needsContinuation = true
+          await notePathFailure(item.path)
           continue
         }
         const applied = applyEditBlocks(oldContent, parseEditBlocks(item.body))
@@ -1145,6 +1273,7 @@ async function parseAndExecuteFileCommands(
           }
           feedback.push(`${label} ${item.arg}: failed - ${applied.error}.${hint}`)
           needsContinuation = true
+          await notePathFailure(item.path)
           continue
         }
         if (applied.alreadyApplied) {
@@ -1155,6 +1284,8 @@ async function parseAndExecuteFileCommands(
           if (state) state.editFailCount = 0
           state?.searchFailStreak?.delete(gateKey(item.path))
           state?.readGate?.delete(gateKey(item.path))
+          state?.pathFailStreak?.delete(gateKey(item.path))
+          state?.verifiedFiles?.add(pathRelativeToRoot(item.path))
           notes[item.index] = `✅ ${i18nService.t('Already applied')}: ${pathRelativeToRoot(item.path)}`
           pushAction({ kind: 'edit', label: i18nService.t('Already applied'), target: pathRelativeToRoot(item.path), status: 'ok' })
           feedback.push(`${label} ${item.arg}: already applied - the replacement text is already in the file; no change needed`)
@@ -1164,6 +1295,7 @@ async function parseAndExecuteFileCommands(
         if (state) state.editFailCount = 0
         state?.searchFailStreak?.delete(gateKey(item.path))
         state?.readGate?.delete(gateKey(item.path))
+        state?.pathFailStreak?.delete(gateKey(item.path))
         // Same fragment guard as WRITE_FILE: an edit result that
         // shrinks the file drastically is likely a truncated REPLACE
         // block deleting more than intended. Block once, let a resend
@@ -1182,6 +1314,7 @@ async function parseAndExecuteFileCommands(
             `otherwise split the change into smaller SEARCH/REPLACE blocks.`
           )
           needsContinuation = true
+          await notePathFailure(item.path)
           continue
         }
         const edit: FileEdit = { filePath: item.path, oldContent, newContent: applied.content! }
@@ -1229,7 +1362,13 @@ async function parseAndExecuteFileCommands(
           }
           checkpoint.pop()
           if (item.existed) state?.readCache?.set(item.path, edit.oldContent)
-          else state?.readCache?.delete(item.path)
+          else {
+            state?.readCache?.delete(item.path)
+            // A rolled-back new file is gone from disk - it can no
+            // longer stand as a verified or modified change.
+            state?.verifiedFiles?.delete(pathRelativeToRoot(item.path))
+            state?.modifiedFiles?.delete(pathRelativeToRoot(item.path))
+          }
           const rollCount = (state?.syntaxRollbacks?.get(gateKey(item.path)) ?? 0) + 1
           state?.syntaxRollbacks?.set(gateKey(item.path), rollCount)
           const rel = pathRelativeToRoot(item.path)
@@ -1246,6 +1385,7 @@ async function parseAndExecuteFileCommands(
           )
           needsContinuation = true
           window.dispatchEvent(new CustomEvent('file-created', { detail: { filePath: item.path } }))
+          await notePathFailure(item.path)
           continue
         }
 
@@ -1265,9 +1405,11 @@ async function parseAndExecuteFileCommands(
           state.editsApplied = (state.editsApplied ?? 0) + 1
           state.modifiedFiles?.add(pathRelativeToRoot(item.path))
           // A successful write proves the model's copy of the file is
-          // workable - clear the miss streak / re-read gate.
+          // workable - clear the miss streak / re-read gate / failure
+          // streak.
           state.searchFailStreak?.delete(gateKey(item.path))
           state.readGate?.delete(gateKey(item.path))
+          state.pathFailStreak?.delete(gateKey(item.path))
           // The model already knows the new content - it wrote it - so a
           // follow-up READ_FILE can be answered "unchanged" as well.
           state.readCache?.set(item.path, edit.newContent)
@@ -1279,6 +1421,7 @@ async function parseAndExecuteFileCommands(
         // whose name is defined nowhere in the project are exactly the
         // "declared but never written" lie seen on real runs - tell the
         // model so it can supply the missing definition.
+        let changeVerified = true
         if (/\.(?:jsx?|tsx?|mjs|cjs)$/i.test(item.path)) {
           const suspects = findUndefinedCallees(edit.newContent)
           const missing: string[] = []
@@ -1298,6 +1441,7 @@ async function parseAndExecuteFileCommands(
             if (!defined) missing.push(name)
           }
           if (missing.length > 0) {
+            changeVerified = false
             pushAction({
               kind: 'notice',
               label: i18nService.t('Possibly undefined function call'),
@@ -1315,6 +1459,20 @@ async function parseAndExecuteFileCommands(
           }
         }
 
+        // The change counts as "verified" when it applied, passed
+        // syntax validation, and raised no missing-callee note - plan
+        // completion marks are audited against this set.
+        if (state && changeVerified) {
+          const relV = pathRelativeToRoot(item.path)
+          state.verifiedFiles?.add(relV)
+          // A plan file the model writes becomes the tracked plan -
+          // the digest injection picks it up from the next step.
+          if (isPlanFileName(item.path)) {
+            state.planPath = item.path
+            appliedPlanEdits.push({ rel: relV, old: edit.oldContent, new: edit.newContent })
+          }
+        }
+
         // Emit event to refresh explorer (and editor if the file is open)
         window.dispatchEvent(new CustomEvent('file-created', {
           detail: { filePath: item.path }
@@ -1326,12 +1484,52 @@ async function parseAndExecuteFileCommands(
         feedback.push(`${label} ${pathRelativeToRoot(item.path)}: failed - ${error}`)
         needsContinuation = true
         batchEditFailed = true
+        await notePathFailure(item.path)
       }
     }
 
     if (state) {
       if (batchEditFailed) state.unresolvedEdit = true
       else if (batchEditSucceeded) state.unresolvedEdit = false
+    }
+
+    // Plan-file audit (L2c): a "- [ ]" -> "- [x]" flip is trusted only
+    // when the run produced a verified change the item could map to.
+    // The mark itself stays (the user's approval applied it) - the
+    // warning sends the model back to actually do the work. Audited
+    // post-batch so same-turn writes count.
+    for (const pe of appliedPlanEdits) {
+      if (!state) break
+      for (const item of newlyCheckedItems(pe.old, pe.new)) {
+        const key = normPlanItemText(item.text)
+        if (state.planWarnedItems?.has(key)) continue
+        const refs = itemFileRefs(item.text)
+        const verified = [...(state.verifiedFiles ?? [])]
+        const matched = refs.some(r => verified.some(p => refMatchesPath(r, p)))
+        // Weak judgment stays advisory: no file ref in the item only
+        // warns when the run produced no verified change at all.
+        if (matched || (refs.length === 0 && verified.length > 0)) continue
+        state.planWarnedItems?.add(key)
+        pushAction({
+          kind: 'notice',
+          label: i18nService.t('Completion mark without a verified change'),
+          target: `${pe.rel}: ${item.text.slice(0, 60)}`,
+          status: 'failed',
+        })
+        feedback.push(
+          `NOTE: plan item "${item.text.slice(0, 100)}" in ${pe.rel} was marked done, ` +
+          `but this run has no verified file change${refs.length > 0 ? ` to ${refs.join(', ')}` : ''} it could correspond to. ` +
+          `A "- [x]" mark is only trusted after the WRITE_FILE/EDIT_FILE it reports actually succeeded - ` +
+          `apply the change first and mark it done afterwards, or explain why no file change was needed.`
+        )
+        needsContinuation = true
+      }
+      // Phase transition gate (L5): a just-completed phase is reported
+      // to the agent loop, which asks the user before the next one.
+      const gate = justCompletedPhase(pe.old, pe.new)
+      if (gate && !state.phaseGatesFired?.has(`${pe.rel}:${gate.done}`)) {
+        state.phaseGate = { file: pe.rel, done: gate.done, next: gate.next }
+      }
     }
   }
 
@@ -1557,6 +1755,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   // The model's prose for the turn under approval - the dialog hides the
   // chat, so the stated intent travels with the dialog itself.
   const [approvalNote, setApprovalNote] = useState<string | null>(null)
+  // Process-approval prompt (L5) - phase transitions / repeated-failure
+  // decisions. Same resolver pattern as the approval dialogs.
+  const [processPrompt, setProcessPrompt] = useState<ProcessPrompt | null>(null)
+  const processResolverRef = useRef<((choice: string | null) => void) | null>(null)
   // "No project open" prompt for AI file writes - same resolver pattern
   // as the approval dialogs. Shown at most once per user turn.
   const [showProjectModal, setShowProjectModal] = useState(false)
@@ -1648,6 +1850,21 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     setApprovalNote(null)
   }
 
+  // Same approval pattern for process prompts - resolves with the
+  // chosen option id, or null when dismissed.
+  const requestProcessApproval = (prompt: ProcessPrompt): Promise<string | null> => {
+    return new Promise((resolve) => {
+      processResolverRef.current = resolve
+      setProcessPrompt(prompt)
+    })
+  }
+
+  const resolveProcess = (choice: string | null) => {
+    processResolverRef.current?.(choice)
+    processResolverRef.current = null
+    setProcessPrompt(null)
+  }
+
   // Pause the agent loop until the user creates a project folder (or
   // declines). Resolves with the new project root, or null on cancel.
   const requestProject = (): Promise<string | null> => {
@@ -1686,6 +1903,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     abortController?.abort()
     resolveApproval(null)
     resolveCommandApproval(null)
+    resolveProcess(null)
     resolveProject(null)
     streamedRef.current = ''
     setStreamingText(null)
@@ -1705,6 +1923,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     if (isLoading) return
     resolveApproval(null)
     resolveCommandApproval(null)
+    resolveProcess(null)
     resolveProject(null)
     streamedRef.current = ''
     setStreamingText(null)
@@ -2224,6 +2443,14 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         readGate: new Set<string>(),
         syntaxRollbacks: new Map<string, number>(),
         largeReadWarned: new Set<string>(),
+        planPath: null as string | null,
+        planScanDone: false,
+        verifiedFiles: new Set<string>(),
+        planWarnedItems: new Set<string>(),
+        phaseGatesFired: new Set<string>(),
+        phaseGate: null as { file: string; done: string; next: string } | null,
+        pathFailStreak: new Map<string, number>(),
+        pathSkipped: new Set<string>(),
       }
       // Stagnation watchdog: a reply that repeats the previous one almost
       // word-for-word while changing nothing on disk is the loop small
@@ -2318,6 +2545,29 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         return out
       }
 
+      // Plan digest (L2b): the plan file is re-read on every agent turn
+      // and its open items are injected into the prompt - the "read the
+      // memo each time" workflow without a READ_FILE round-trip, and it
+      // survives elision of earlier read results. Detection runs once;
+      // a plan file the model writes mid-run registers in the write
+      // path (agentState.planPath).
+      const readPlanSection = async (): Promise<string> => {
+        const project = projectService.getCurrentProject()
+        if (!project?.isOpen || !window.electronAPI) return ''
+        if (!agentState.planPath && !agentState.planScanDone) {
+          agentState.planScanDone = true
+          agentState.planPath = await detectPlanFile(project.rootPath)
+        }
+        if (!agentState.planPath) return ''
+        try {
+          const res = await window.electronAPI.readFile(agentState.planPath)
+          if (!res.success) { agentState.planPath = null; return '' }
+          return formatPlanDigest(pathRelativeToRoot(agentState.planPath), res.content ?? '')
+        } catch {
+          return ''
+        }
+      }
+
       // A model that emits reasoning but no reply text routes its output
       // to a channel this protocol cannot read only when the model is
       // channel-routed (gpt-oss/harmony) - retry cannot fix that, so it
@@ -2356,6 +2606,11 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
 
       for (let step = 0; step < MAX_STEPS + 1; step++) {
         if (controller.signal.aborted) break
+
+        // Inject the plan's current position ahead of whatever this
+        // step sends (the user request on step 0, tool results later).
+        const planSection = await readPlanSection()
+        if (planSection) currentInput = `${planSection}\n${currentInput}`
 
         const { onDelta, getStreamed } = makeStreamHandler()
         const callStart = performance.now()
@@ -2419,7 +2674,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         agentState.lastTurnTruncated = truncatedByLimit
 
         const editsBefore = agentState.editsApplied ?? 0
-        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode, stopAtUserBoundary } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, agentState, readOnly, (acts) => updateStep({ actions: [...acts] }))
+        const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode, stopAtUserBoundary } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, requestProcessApproval, agentState, readOnly, (acts) => updateStep({ actions: [...acts] }))
         if (blockedInAskMode) askModeBlocked = true
         if (controller.signal.aborted) break
         setStreamingText(null)
@@ -2551,6 +2806,39 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           break
         }
 
+        // Plan phase gate (L5): a plan phase was just checked complete
+        // and the model is about to start the next one - the user
+        // approves the transition (the question is about the approach,
+        // not a diff). Declining ends the run at the boundary.
+        if (agentState.phaseGate) {
+          const gate = agentState.phaseGate
+          agentState.phaseGate = null
+          agentState.phaseGatesFired.add(`${gate.file}:${gate.done}`)
+          const choice = await requestProcessApproval({
+            title: i18nService.t('Plan phase complete'),
+            body: i18nService.t('Phase "{done}" is marked complete in {file}. Proceed to "{next}"?')
+              .replace('{done}', gate.done).replace('{file}', gate.file).replace('{next}', gate.next),
+            options: [
+              { id: 'continue', label: i18nService.t('Proceed to next phase') },
+              { id: 'stop', label: i18nService.t('Stop here') },
+            ],
+          })
+          if (controller.signal.aborted) break
+          if (choice !== 'continue') {
+            boundaryStopped = true
+            stepActions.push({ kind: 'notice', label: i18nService.t('Stopped at phase transition'), target: gate.done, status: 'ok' })
+            updateStep({ actions: stepActions })
+            setMessages((prev) => [...prev, {
+              role: 'assistant',
+              content: `⏹️ ${i18nService.t('Stopped: the user chose not to proceed to the next plan phase.')}`,
+              timestamp: Date.now(),
+              isError: true,
+            }])
+            break
+          }
+          feedback.push(`NOTE: the user approved proceeding to the next plan phase ("${gate.next}").`)
+        }
+
         // Small models burn steps re-verifying finished work - tell them
         // the remaining step budget and how to close out the task. The
         // STATE line first reminds them what they have already done so
@@ -2613,7 +2901,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         const summaryLatencyMs = Math.round(performance.now() - summaryStart)
         // Last turn of the run: the code-shown nudge would only emit a
         // misleading "asking the model to retry" note, so pre-set it.
-        const { display: summaryDisplay, actions: summaryActions } = await parseAndExecuteFileCommands(summary, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, { ...agentState, codeShownNudged: true }, readOnly)
+        const { display: summaryDisplay, actions: summaryActions } = await parseAndExecuteFileCommands(summary, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, requestProcessApproval, { ...agentState, codeShownNudged: true }, readOnly)
         if (controller.signal.aborted) return
         setStreamingText(null)
         const summaryText = summaryDisplay || getSummaryStreamed()
@@ -2717,6 +3005,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     // If approval dialogs are open, treat cancel as reject-all
     resolveApproval(null)
     resolveCommandApproval(null)
+    resolveProcess(null)
     resolveProject(null)
     if (abortController) {
       abortController.abort()
@@ -3088,6 +3377,13 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           onApprove={resolveCommandApproval}
           onReject={() => resolveCommandApproval(null)}
           onRejectOne={handleRejectOneCommand}
+          onCancel={handleCancel}
+        />
+      )}
+      {processPrompt && (
+        <ProcessApproval
+          prompt={processPrompt}
+          onChoose={resolveProcess}
           onCancel={handleCancel}
         />
       )}

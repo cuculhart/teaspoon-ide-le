@@ -487,5 +487,18 @@
   "Prompt larger than num_ctx - model output may degrade": "プロンプトがnum_ctxを超過 - モデル出力が劣化している可能性",
   "Stopped: the model kept repeating the same reply without changing anything. The context window may be saturated - try a new chat or raise num_ctx in Settings.": "停止しました: モデルが何も変更せず同じ応答を繰り返していました。コンテキストウィンドウが飽和している可能性があります - 新しいチャットを始めるか、設定でnum_ctxを引き上げてください。",
   "No file change was applied in this run - completion claims above may not match the disk.": "このランではファイルへの変更は1件も適用されませんでした - 上の完了報告はディスクの実態と一致しない可能性があります。",
-  "Stopped at the model's question - reply to continue": "モデルの質問で停止 - 回答すると続行できます"
+  "Stopped at the model's question - reply to continue": "モデルの質問で停止 - 回答すると続行できます",
+  "Repeated failure": "繰り返し失敗",
+  "Changes to \"{path}\" have failed {count} times in a row. How should the work proceed?": "\"{path}\" への変更が{count}回連続で失敗しました。どう進めますか？",
+  "Keep trying": "このまま続行",
+  "Change approach": "方針を変える",
+  "Skip this item": "この項目をスキップ",
+  "Skipped at user request": "ユーザーの判断でスキップ",
+  "Plan phase complete": "計画フェーズ完了",
+  "Phase \"{done}\" is marked complete in {file}. Proceed to \"{next}\"?": "{file} のフェーズ「{done}」が完了しました。次のフェーズ「{next}」に進みますか？",
+  "Proceed to next phase": "次のフェーズへ進む",
+  "Stop here": "ここで停止",
+  "Stopped at phase transition": "フェーズ移行で停止",
+  "Stopped: the user chose not to proceed to the next plan phase.": "停止しました: ユーザーが次の計画フェーズへの移行を承認しませんでした。",
+  "Completion mark without a verified change": "検証済みの変更なしで完了マーク"
 }

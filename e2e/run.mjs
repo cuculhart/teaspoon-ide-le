@@ -895,6 +895,174 @@ test('V-9  approval dialogs show the turn explanation', async () => {
   } finally { await app.close() }
 })
 
+// V-10 (v1.3.0 L2b): a project plan file's open items are injected into
+// every agent turn - no READ_FILE round-trip needed for "where are we".
+// Done items collapse to a count so the digest stays small.
+test('V-10 plan digest is injected into every request', async () => {
+  const tmp = mkTmp('tsp-v10-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'),
+    '# Plan\n' +
+    '## Section A\n' +
+    '- [x] done item DONE_ITEM_SENTINEL_AAA\n' +
+    '## Section B\n' +
+    '- [ ] open item OPEN_ITEM_SENTINEL_BBB\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, ['V10_DONE'], reqs)
+    await sendChat(page, 'hello')
+    await waitForMarker(page, 'V10_DONE')
+    assert.ok(reqs[0].includes('[PLAN]'), `no plan digest in request:\n${reqs[0]}`)
+    assert.ok(reqs[0].includes('develop-plan.md'), 'plan file name missing from digest')
+    assert.ok(reqs[0].includes('OPEN_ITEM_SENTINEL_BBB'),
+      'open item missing from digest')
+    assert.ok(reqs[0].includes('1 of 2 items done'),
+      'done count missing from digest')
+    assert.ok(!reqs[0].includes('DONE_ITEM_SENTINEL_AAA'),
+      'completed item text leaked into the digest')
+  } finally { await app.close() }
+})
+
+// V-11 (v1.3.0 L2c): marking a plan item "- [x]" without any verified
+// file change it could map to is the "reported done, nothing on disk"
+// lie - the mark stays (user approved it) but the model gets a warning
+// and the step card shows it.
+test('V-11 unverified completion mark warns the model', async () => {
+  const tmp = mkTmp('tsp-v11-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const planPath = path.join(proj, 'develop-plan.md')
+  fs.writeFileSync(planPath, '# Plan\n- [ ] 1. fix script.js\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// EDIT_FILE: develop-plan.md\n<<<<<<< SEARCH\n- [ ] 1. fix script.js\n=======\n- [x] 1. fix script.js\n>>>>>>> REPLACE\n// END_EDIT_FILE',
+      'V11_DONE',
+    ], reqs)
+    await sendChat(page, 'mark the plan item done')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V11_DONE')
+    assert.ok(reqs.some((r) => r.includes('no verified file change')),
+      'model was not warned about the unverified mark')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('検証済みの変更なしで完了マーク'),
+      'no step-card notice:\n' + msgs)
+    // The mark itself stays - the harness warns, it does not revert a
+    // change the user approved.
+    assert.ok(fs.readFileSync(planPath, 'utf8').includes('- [x]'),
+      'the completion mark was removed')
+  } finally { await app.close() }
+})
+
+// V-12 (v1.3.0 L2c): the same mark made in the SAME batch as a verified
+// change to the referenced file is legitimate - no warning.
+test('V-12 completion mark after a verified change does not warn', async () => {
+  const tmp = mkTmp('tsp-v12-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'), '# Plan\n- [ ] 1. fix script.js\n')
+  fs.writeFileSync(path.join(proj, 'script.js'), 'const a = 1\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// WRITE_FILE: script.js\nconst a = 2\n// END_WRITE_FILE\n' +
+      '// EDIT_FILE: develop-plan.md\n<<<<<<< SEARCH\n- [ ] 1. fix script.js\n=======\n- [x] 1. fix script.js\n>>>>>>> REPLACE\n// END_EDIT_FILE',
+      'V12_DONE',
+    ], reqs)
+    await sendChat(page, 'fix script.js and mark the plan item done')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V12_DONE')
+    assert.ok(!reqs.some((r) => r.includes('no verified file change')),
+      'a verified completion mark was still warned')
+  } finally { await app.close() }
+})
+
+// V-13 (v1.3.0 L5): a plan phase that just completed gates the next one -
+// the user approves the transition, not the model. Approving lets the
+// run continue; the model is told the transition was approved.
+test('V-13 completed plan phase prompts for the transition', async () => {
+  const tmp = mkTmp('tsp-v13-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'),
+    '# Plan\n' +
+    '- [ ] 1. setup\n' +
+    '  - [ ] 1.1 sub task\n' +
+    '- [ ] 2. build\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// EDIT_FILE: develop-plan.md\n' +
+      '<<<<<<< SEARCH\n- [ ] 1. setup\n  - [ ] 1.1 sub task\n=======\n' +
+      '- [x] 1. setup\n  - [x] 1.1 sub task\n>>>>>>> REPLACE\n// END_EDIT_FILE\n' +
+      '// LIST_FILES: .',
+      'V13_DONE',
+    ], reqs)
+    await sendChat(page, 'finish phase 1 and continue')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await page.waitForSelector('.process-approval', { timeout: 30000 })
+    const body = await page.locator('.process-approval .process-question').innerText()
+    assert.ok(body.includes('setup') && body.includes('build'),
+      'phase question missing phase names:\n' + body)
+    await page.click('.process-approval .approve-button')
+    await waitForMarker(page, 'V13_DONE')
+    assert.ok(reqs.some((r) => r.includes('approved proceeding to the next plan phase')),
+      'model was not told the transition was approved')
+  } finally { await app.close() }
+})
+
+// V-14 (v1.3.0 L5): the same file failing its edit three times in a row
+// is a stuck loop the model cannot break - the user decides. Choosing
+// "skip" bounces later writes to that path back to the model.
+test('V-14 repeated failures ask the user; skip blocks the path', async () => {
+  const tmp = mkTmp('tsp-v14-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'f.js')
+  fs.writeFileSync(target, 'alpha\nbeta\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const badEdit = '// EDIT_FILE: f.js\n<<<<<<< SEARCH\nNOPE_NOT_THERE\n=======\nx\n>>>>>>> REPLACE\n// END_EDIT_FILE'
+    const reqs = []
+    await mockModel(page, [
+      badEdit,                  // failure 1
+      badEdit,                  // failure 2 -> re-read gate arms
+      '// READ_FILE: f.js',     // gate release (fail streak survives)
+      badEdit,                  // failure 3 -> process prompt
+      '// WRITE_FILE: f.js\nhacked\n// END_WRITE_FILE', // skipped, no dialog
+      'V14_DONE',
+      'スキップを承知しました。',
+    ], reqs)
+    await sendChat(page, 'edit f.js')
+    await page.waitForSelector('.process-approval', { timeout: 60000 })
+    // "この項目をスキップ" is the third option button.
+    await page.click('.process-approval .approval-actions button >> nth=3')
+    await waitForMarker(page, 'V14_DONE')
+    assert.ok(reqs.some((r) => r.includes('chose to SKIP')),
+      'model was not told the item was skipped')
+    assert.ok(reqs.some((r) => r.includes('chose to skip this item')),
+      'skipped path was not rejected')
+    // The skipped write never reached the file-approval dialog.
+    assert.strictEqual(await page.locator('.file-edit-approval').count(), 0,
+      'skipped write reached the approval dialog')
+    assert.strictEqual(fs.readFileSync(target, 'utf8'), 'alpha\nbeta\n',
+      'skipped path was modified')
+  } finally { await app.close() }
+})
+
 // ---------- runner ----------
 
 async function main() {

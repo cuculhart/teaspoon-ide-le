@@ -59,6 +59,11 @@ If you need to find files by name or path (supports glob like *.ts or plain subs
 If you need to run a shell command (e.g. install dependencies, run tests, build), use this format:
 // RUN_COMMAND: <command>
 
+PLAN FILES: When the task needs several file changes or phases, first create or update a plan file at the project root named "develop-plan.md" (any "*-plan.md" or "TODO.md" works as a plan file). Track work as checkbox items - one per line:
+- [ ] 1. task name (priority: high/medium/low)
+- [x] 2. done task
+For heavy items, break them down into numbered sub-items (2.1, 2.2, ...). Update the plan as you go: mark an item "- [x]" ONLY after its file change was actually applied - never mark work done before the WRITE_FILE/EDIT_FILE succeeded. You do not need to re-read the plan each turn: the app shows you its current open items automatically.
+
 CONTEXT NOTE: The project context contains only a file tree (paths, no contents). Fetch the contents you need with READ_FILE, GREP, or LIST_FILES - never guess what a file contains.
 
 VERIFICATION: If the project has a test suite (a tests/ directory, test_*.py files, a "test" script in package.json, etc.), run it with RUN_COMMAND after your edits and fix any regressions before giving your final answer. When the user requires existing behavior or public APIs to stay unchanged, double-check that function signatures and semantics were preserved.
