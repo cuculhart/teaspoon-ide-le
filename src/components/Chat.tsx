@@ -413,8 +413,8 @@ function findUndefinedCallees(content: string): string[] {
 // results to send back to the model so it can continue its work.
 async function parseAndExecuteFileCommands(
   response: string,
-  requestApproval: (edits: FileEdit[]) => Promise<FileEdit[] | null>,
-  requestCommandApproval: (commands: string[]) => Promise<string[] | null>,
+  requestApproval: (edits: FileEdit[], note?: string) => Promise<FileEdit[] | null>,
+  requestCommandApproval: (commands: string[], note?: string) => Promise<string[] | null>,
   runCommandAndWait: (command: string) => Promise<RunResult>,
   userText: string,
   requestProject?: () => Promise<string | null>,
@@ -487,6 +487,22 @@ async function parseAndExecuteFileCommands(
   onAction?: (actions: AgentAction[]) => void
 ): Promise<CommandExecutionResult> {
   const { commands, docSpans } = findFileCommands(response)
+
+  // The model's prose minus command blocks. Approval dialogs hide the
+  // chat behind a modal, so the user would otherwise approve a diff or
+  // a shell command without ever seeing the model's stated intent -
+  // surface this text inside the dialog itself.
+  const proseParts: string[] = []
+  {
+    let pc = 0
+    for (const cmd of commands) {
+      if (cmd.start > pc) proseParts.push(response.slice(pc, cmd.start))
+      pc = Math.max(pc, cmd.end)
+    }
+    proseParts.push(response.slice(pc))
+  }
+  const approvalNote = proseParts.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+    .slice(0, 4000)
 
   // Text inside WRITE_FILE/EDIT_FILE blocks is file content, not commands -
   // mask it so mentions like "// WRITE_FILE:" in a README don't trigger the
@@ -1175,7 +1191,7 @@ async function parseAndExecuteFileCommands(
     }
 
     // All edits may have failed to apply - don't open an empty modal
-    const approved = edits.length > 0 ? await requestApproval(edits) : []
+    const approved = edits.length > 0 ? await requestApproval(edits, approvalNote) : []
     const approvedSet = new Set(approved ?? [])
 
     for (const edit of edits) {
@@ -1321,7 +1337,7 @@ async function parseAndExecuteFileCommands(
 
   // Ask the user to approve shell commands before running them
   if (pendingRuns.length > 0) {
-    const approvedCommands = await requestCommandApproval(pendingRuns.map(r => r.command))
+    const approvedCommands = await requestCommandApproval(pendingRuns.map(r => r.command), approvalNote)
     const approvedSet = new Set(approvedCommands ?? [])
 
     for (const r of pendingRuns) {
@@ -1538,6 +1554,9 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   const approvalResolverRef = useRef<((edits: FileEdit[] | null) => void) | null>(null)
   const [pendingCommands, setPendingCommands] = useState<string[] | null>(null)
   const commandResolverRef = useRef<((commands: string[] | null) => void) | null>(null)
+  // The model's prose for the turn under approval - the dialog hides the
+  // chat, so the stated intent travels with the dialog itself.
+  const [approvalNote, setApprovalNote] = useState<string | null>(null)
   // "No project open" prompt for AI file writes - same resolver pattern
   // as the approval dialogs. Shown at most once per user turn.
   const [showProjectModal, setShowProjectModal] = useState(false)
@@ -1588,9 +1607,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
 
   // Pause the agent loop until the user approves or rejects file writes.
   // Resolves with the approved edits (subset allowed) or null on reject-all.
-  const requestApproval = (edits: FileEdit[]): Promise<FileEdit[] | null> => {
+  const requestApproval = (edits: FileEdit[], note?: string): Promise<FileEdit[] | null> => {
     return new Promise((resolve) => {
       approvalResolverRef.current = resolve
+      setApprovalNote(note ?? null)
       setPendingEdits(edits)
     })
   }
@@ -1599,6 +1619,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     approvalResolverRef.current?.(edits)
     approvalResolverRef.current = null
     setPendingEdits(null)
+    setApprovalNote(null)
   }
 
   const handleRejectOneEdit = (edit: FileEdit) => {
@@ -1612,9 +1633,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   }
 
   // Same approval pattern for shell commands
-  const requestCommandApproval = (commands: string[]): Promise<string[] | null> => {
+  const requestCommandApproval = (commands: string[], note?: string): Promise<string[] | null> => {
     return new Promise((resolve) => {
       commandResolverRef.current = resolve
+      setApprovalNote(note ?? null)
       setPendingCommands(commands)
     })
   }
@@ -1623,6 +1645,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
     commandResolverRef.current?.(commands)
     commandResolverRef.current = null
     setPendingCommands(null)
+    setApprovalNote(null)
   }
 
   // Pause the agent loop until the user creates a project folder (or
@@ -3051,6 +3074,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       {pendingEdits && pendingEdits.length > 0 && (
         <FileEditApproval
           edits={pendingEdits}
+          note={approvalNote}
           onApprove={resolveApproval}
           onReject={() => resolveApproval(null)}
           onRejectOne={handleRejectOneEdit}
@@ -3060,6 +3084,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       {pendingCommands && pendingCommands.length > 0 && (
         <CommandApproval
           commands={pendingCommands}
+          note={approvalNote}
           onApprove={resolveCommandApproval}
           onReject={() => resolveCommandApproval(null)}
           onRejectOne={handleRejectOneCommand}

@@ -853,6 +853,48 @@ test('V-8  permission question without a scope still continues', async () => {
   } finally { await app.close() }
 })
 
+// V-9 (v1.3.0 L10): the approval dialogs surface the model's prose from
+// the same turn - the modal hides the chat, so the stated intent must
+// travel with the dialog itself. Checked on both the file-edit and the
+// command approval dialogs.
+test('V-9  approval dialogs show the turn explanation', async () => {
+  const tmp = mkTmp('tsp-v9-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const target = path.join(proj, 'note.js')
+  fs.writeFileSync(target, 'const a = 1\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    await mockModel(page, [
+      'このファイルの初期値を更新します。マジックナンバーの修正です。\n' +
+        '// WRITE_FILE: note.js\nconst a = 2\n// END_WRITE_FILE',
+      '次に動作確認のため echo を実行します。\n' +
+        '// RUN_COMMAND: echo v9_ok',
+      'V9_DONE',
+    ])
+    await sendChat(page, 'update note.js')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    let note = await page.locator('.approval-model-note .note-text').innerText()
+    assert.ok(note.includes('マジックナンバー'),
+      'file approval dialog is missing the model note:\n' + note)
+    assert.ok(!note.includes('END_WRITE_FILE'),
+      'file body leaked into the approval note:\n' + note)
+    await page.click('.approve-button')
+    // The first dialog closes before the command dialog opens - wait for
+    // detach so we do not read the stale note from the file dialog.
+    await page.waitForSelector('.file-edit-approval', { state: 'detached', timeout: 30000 })
+    await page.waitForSelector('.file-edit-approval', { state: 'attached', timeout: 30000 })
+    note = await page.locator('.approval-model-note .note-text').innerText()
+    assert.ok(note.includes('動作確認'),
+      'command approval dialog is missing the model note:\n' + note)
+    await page.click('.approve-button')
+    await waitForMarker(page, 'V9_DONE')
+    assert.ok(fs.readFileSync(target, 'utf8').includes('a = 2'),
+      'approved write did not land')
+  } finally { await app.close() }
+})
+
 // ---------- runner ----------
 
 async function main() {
