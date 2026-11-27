@@ -13,6 +13,7 @@ import CreateProjectModal from './CreateProjectModal'
 import { i18nService, useT } from '../services/i18nService'
 import { findFileCommands } from '../services/commandParser'
 import { OllamaEmptyResponseError, ollamaService } from '../services/ollamaService'
+import { recommendedNumCtxForModel } from '../services/modelGuide'
 import type { AgentAction } from '../types/agent'
 import { commandResultVerdict, formatStateDigest, TEST_COMMAND_RE } from '../services/toolFeedback'
 import { checkpointService } from '../services/checkpointService'
@@ -698,8 +699,13 @@ async function parseAndExecuteFileCommands(
   const replyTail = response.trim().slice(-160)
   const ASKS_PERMISSION =
     /[?？]\s*$/.test(replyTail) ||
+    // Japanese models close polite questions with 。 too
+    // ("実装してもよろしいでしょうか。") - a bare "か。" tail is a
+    // question. Scoped-only via USER_SCOPED_STOP, so a stray
+    // declarative "か。" costs at most an early stop.
+    /か[？?。]?\s*$/.test(replyTail) ||
     /(?:お知らせください|お待ちしています|待っています|教えてください|連絡ください|聞かせてください|let me know|waiting for (?:you|your)|awaiting your)\s*[。.\s]*$/i.test(replyTail)
-  const stopAtUserBoundary = USER_SCOPED_STOP.test(userText) && ASKS_PERMISSION
+  let stopAtUserBoundary = USER_SCOPED_STOP.test(userText) && ASKS_PERMISSION
   // "how is X created" / "where is X written" are questions, not
   // file-creation requests - a fenced snippet there is an explanation.
   // Missing a real nudge is cheap; a false one burns a paid turn.
@@ -827,7 +833,13 @@ async function parseAndExecuteFileCommands(
     pushAction({ kind: 'notice', label: i18nService.t('Result block imitated - asking the model to retry'), target: '', status: 'failed' })
     needsContinuation = true
   }
-  if (deferred && !stopAtUserBoundary) {
+  // In a user-scoped run a deferral after applied work is the user's
+  // stop line, not a stall ("4.1だけ" + "次は4.2に進みます" crosses the
+  // boundary the user drew - observed). The write batch decides it
+  // below: a deferral with nothing applied stays an anti-stall
+  // continuation.
+  const deferralBoundaryPending = deferred && !stopAtUserBoundary && USER_SCOPED_STOP.test(userText)
+  if (deferred && !stopAtUserBoundary && !deferralBoundaryPending) {
     feedback.push(
       'You ended your turn asking the user to say "continue" (or similar) before emitting the rest of the work. ' +
       'Do not wait for the user - continue NOW in this response and emit the remaining file commands or output you listed.'
@@ -1515,6 +1527,14 @@ async function parseAndExecuteFileCommands(
       else if (batchEditSucceeded) state.unresolvedEdit = false
     }
 
+    // The deferral decision postponed above resolves here: applied
+    // work in a user-scoped run makes "next I'll do X" the user's stop
+    // line instead of a stall to push through.
+    if (deferralBoundaryPending && batchEditSucceeded) {
+      stopAtUserBoundary = true
+      pushAction({ kind: 'notice', label: i18nService.t("Stopped at the model's question - reply to continue"), target: '', status: 'ok' })
+    }
+
     // Plan-file audit (L2c): a "- [ ]" -> "- [x]" flip is trusted only
     // when the run produced a verified change the item could map to.
     // The mark itself stays (the user's approval applied it) - the
@@ -1684,6 +1704,17 @@ async function parseAndExecuteFileCommands(
     }
   }
 
+  // The postponed scoped-deferral fallback: nothing was applied, so the
+  // "next I'll do X" ending is still a stall to continue past.
+  if (deferralBoundaryPending && !stopAtUserBoundary) {
+    feedback.push(
+      'You ended your turn asking the user to say "continue" (or similar) before emitting the rest of the work. ' +
+      'Do not wait for the user - continue NOW in this response and emit the remaining file commands or output you listed.'
+    )
+    pushAction({ kind: 'notice', label: i18nService.t('Deferred to a later response - asking the model to continue now'), target: '', status: 'failed' })
+    needsContinuation = true
+  }
+
   // Rebuild display text: replace each command block with its readable note
   let display = ''
   let cursor = 0
@@ -1797,6 +1828,16 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   const checkpointsRef = useRef<{ path: string; prevContent: string; existed: boolean }[][]>([])
   const [canRollback, setCanRollback] = useState(false)
   const [confirmClearChat, setConfirmClearChat] = useState(false)
+  // The "raise num_ctx?" hint shows once per app session, not per run -
+  // repeating it on every send would train the user to ignore it.
+  const ctxGuideShownRef = useRef(false)
+  // Set synchronously when the user interacts with this mount (send,
+  // conversation pick). The mount-time conversation restore resolves
+  // later (up to ~2s wait + history read); without this it would
+  // overwrite messages pushed in the meantime - including a first
+  // send's ctx-guide notice, while ctxGuideShownRef stays set and can
+  // never refire.
+  const userInteractedRef = useRef(false)
   // Ask (read-only) vs agent mode - persisted in configService. The mode
   // is read once per send, so toggling never affects an in-flight run.
   const [chatMode, setChatMode] = useState<'agent' | 'ask'>(() => configService.getChatMode())
@@ -1960,6 +2001,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   // event so the chat is NOT remounted (unlike Explorer's open path).
   const handleSelectConversation = async (meta: ConversationMeta) => {
     if (isLoading || meta.id === convIdRef.current) return
+    userInteractedRef.current = true
     const conv = await chatHistoryService.getById(meta.id)
     if (!conv) return
     if (meta.projectPath) {
@@ -2187,7 +2229,9 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         ? await chatHistoryService.getByProject(project.rootPath)
         : await chatHistoryService.getById(configService.getLastNoProjectConv())
       if (cancelled) return
-      if (conv) {
+      // A send that started before this restore resolved has already
+      // pushed messages - do not wipe them with the stored conversation.
+      if (conv && !userInteractedRef.current) {
         setConvId(conv.id)
         convCreatedAtRef.current = conv.createdAt
         convProjectPathRef.current = conv.projectPath
@@ -2340,6 +2384,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
   }
 
   const sendToAI = async (userMessage: Message, historyBase: Message[]) => {
+    userInteractedRef.current = true
     setIsLoading(true)
     setRunStatus(null)
 
@@ -2442,6 +2487,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       let currentInput = userMessage.content
       // Carried from the results-builder to the next user-entry push.
       let pendingReadSpans: { path: string; start: number; end: number }[] | undefined
+      // pendingReadSpans are recorded against currentInput; the plan
+      // digest prepended at send time shifts them by this much in the
+      // prompt actually transmitted.
+      let pendingReadSpanOffset = 0
       let lastStepRanCommands = false
       // Tracks consecutive EDIT_FILE failures across loop steps so the
       // feedback can steer the model to WRITE_FILE instead of retrying the
@@ -2474,6 +2523,24 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         pathFailStreak: new Map<string, number>(),
         pathSkipped: new Set<string>(),
       }
+      // The Settings guide is easy to miss - surface the same
+      // recommendation once per session when the selected model's
+      // working num_ctx is below its known-good value. The session-only
+      // raise (A-7) is offered as the one-click fix.
+      {
+        const runNumCtx = configService.getOllamaNumCtx() ?? 0
+        const recommended = recommendedNumCtxForModel(llmPin.model ?? '')
+        if (runNumCtx > 0 && recommended && runNumCtx < recommended
+          && !ctxGuideShownRef.current) {
+          ctxGuideShownRef.current = true
+          setMessages((prev) => [...prev, {
+            role: 'assistant',
+            content: `💡 ${i18nService.t('This model is easier to drive with a larger context window ({n} recommended; current {cur}).').replace('{n}', String(recommended)).replace('{cur}', String(runNumCtx))}`,
+            timestamp: Date.now(),
+            canRaiseNumCtx: recommended,
+          }])
+        }
+      }
       // Stagnation watchdog: a reply that repeats the previous one almost
       // word-for-word while changing nothing on disk is the loop small
       // models fall into (context saturation makes it worse). One repeat
@@ -2490,6 +2557,12 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // Ollama silently drops the system prompt past the limit, which is
       // precisely what produces the repetition loop above.
       let ctxOverflowWarned = false
+      // Crossing ~80% of num_ctx warns once per run - before the
+      // overflow notice, which only fires past the ceiling.
+      let ctxDangerWarned = false
+      // 'length' truncation at a saturated window ends the run outright
+      // (continuing cannot fit) - set by the ctxExhausted check below.
+      let ctxExhaustedAborted = false
       // One-shot guard: nudge the model at most once when it declares
       // completion while a failure is still unresolved.
       let failureNudged = false
@@ -2562,7 +2635,7 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         for (let s = pendingReadSpans.length - 1; s >= 0; s--) {
           const { path, start, end } = pendingReadSpans[s]
           agentState.elidedReads.add(path)
-          out = out.slice(0, start) + '(content omitted - emit READ_FILE to fetch it again)' + out.slice(end)
+          out = out.slice(0, start + pendingReadSpanOffset) + '(content omitted - emit READ_FILE to fetch it again)' + out.slice(end + pendingReadSpanOffset)
         }
         return out
       }
@@ -2656,13 +2729,18 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
 
         // Inject the plan's current position ahead of whatever this
         // step sends (the user request on step 0, tool results later).
+        // The digest is re-read and re-injected fresh on every step, so
+        // it must NOT be baked into historyForRequest below - an older
+        // digest riding along in the history just re-spends input
+        // tokens on the next call (num_ctx is the scarce resource here).
         const planSection = await readPlanSection()
-        if (planSection) currentInput = `${planSection}\n${currentInput}`
+        const sendInput = planSection ? `${planSection}\n${currentInput}` : currentInput
+        pendingReadSpanOffset = sendInput.length - currentInput.length
 
         const { onDelta, getStreamed } = makeStreamHandler()
         const callStart = performance.now()
         let usage: Message['tokens']
-        const response = await sendAgent(currentInput, onDelta, (u) => { usage = u; lastUsage = u })
+        const response = await sendAgent(sendInput, onDelta, (u) => { usage = u; lastUsage = u })
         const latencyMs = Math.round(performance.now() - callStart)
         // Persist this step's prompt (the user message at step 0, tool
         // results afterwards) into the running history. Without this each
@@ -2719,6 +2797,13 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         // instead of ending the run mid-sentence.
         const truncatedByLimit = usage?.doneReason === 'length'
         agentState.lastTurnTruncated = truncatedByLimit
+        // 'length' with prompt+reply already at the ceiling is context
+        // exhaustion, not an output-cap cut - the next request is
+        // strictly larger, so "continue" can never fit. Break the run
+        // instead of churning truncated giant blocks until the step
+        // budget burns out.
+        const ctxExhausted = truncatedByLimit && numCtxLimit > 0
+          && ((usage?.input ?? 0) + (usage?.output ?? 0)) >= numCtxLimit * 0.95
 
         const editsBefore = agentState.editsApplied ?? 0
         const { display, feedback, needsContinuation, checkpoint, actions, blockedInAskMode, stopAtUserBoundary } = await parseAndExecuteFileCommands(response, requestApproval, requestCommandApproval, runCommandAndWait, userMessage.content, requestProject, requestProcessApproval, agentState, readOnly, (acts) => updateStep({ actions: [...acts] }))
@@ -2735,7 +2820,14 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
 
         const stepActions = actions ? [...actions] : []
         if (truncatedByLimit) {
-          stepActions.push({ kind: 'notice', label: i18nService.t('Reply cut off at the token limit - asking the model to continue'), target: '', status: 'failed' })
+          stepActions.push({
+            kind: 'notice',
+            label: ctxExhausted
+              ? i18nService.t('Context window exhausted - stopping the run')
+              : i18nService.t('Reply cut off at the token limit - asking the model to continue'),
+            target: '',
+            status: 'failed',
+          })
         }
 
         // Progress = an applied write/edit or an executed shell command
@@ -2758,6 +2850,24 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
             `Do not repeat yourself: emit a file command that differs from your last attempt, or tell the user you are stuck and why.`
           )
           stepActions.push({ kind: 'notice', label: i18nService.t('Repeated reply with no progress - warning the model'), target: '', status: 'failed' })
+        }
+        // At ~80% of num_ctx a normal-size reply is the last one that
+        // still fits - warn once so the user sees saturation coming,
+        // and tell the model to close out instead of starting more
+        // large reads or writes.
+        if (!ctxDangerWarned && !ctxOverflowWarned && numCtxLimit > 0
+          && (usage?.input ?? 0) >= numCtxLimit * 0.8 && (usage?.input ?? 0) <= numCtxLimit) {
+          ctxDangerWarned = true
+          stepActions.push({
+            kind: 'notice',
+            label: i18nService.t('Context window nearly full'),
+            target: `~${usage!.input} of ${numCtxLimit} tokens`,
+            status: 'failed',
+          })
+          feedback.push(
+            `NOTE: the prompt is already at ~${Math.round((usage!.input! / numCtxLimit) * 100)}% of the ${numCtxLimit}-token context window - ` +
+            `wrap up the task now: no new large READ_FILE calls, keep replies short, emit only small file commands.`
+          )
         }
         // A prompt already larger than num_ctx means Ollama silently
         // dropped the system prompt for this step - degraded, looping
@@ -2783,6 +2893,13 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
         // The watchdog kills the run outright - no nudge, no closing
         // summary (a looping model would just narrate a fake one).
         if (stagnantAborted) break
+
+        // Context exhaustion likewise cannot recover inside this run -
+        // the ending notice below offers the num_ctx raise button.
+        if (ctxExhausted) {
+          ctxExhaustedAborted = true
+          break
+        }
 
         // A permission question ending inside a user-scoped run is the
         // user's stop line, not a deferral - ending here hands the
@@ -2930,8 +3047,9 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
       // Continuation is spent, so needsContinuation is ignored here.
       // Watchdog-aborted and boundary-stopped runs skip this entirely -
       // the former would narrate a fake success, the latter already
-      // closed on the model's own question to the user.
-      if (lastStepRanCommands && !controller.signal.aborted && !stagnantAborted && !boundaryStopped) {
+      // closed on the model's own question to the user. A run that died
+      // of context exhaustion cannot fit one more request either.
+      if (lastStepRanCommands && !controller.signal.aborted && !stagnantAborted && !boundaryStopped && !ctxExhaustedAborted) {
         const summaryInput =
           ((agentState.editsAttempted ?? 0) > 0 && (agentState.editsApplied ?? 0) === 0
             ? `The file operations FAILED - no change was applied to disk. `
@@ -2984,6 +3102,20 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
           content: `⏹️ ${i18nService.t('Stopped: the model kept repeating the same reply without changing anything. The context window may be saturated - try a new chat or raise num_ctx in Settings.')}`,
           timestamp: Date.now(),
           isError: true,
+        }])
+      } else if (ctxExhaustedAborted) {
+        // The window is already full - continuing the run could not
+        // fit the next prompt. Offer the recommended guide value when
+        // the model has one, else double the current setting.
+        const recommended = recommendedNumCtxForModel(llmPin.model ?? '')
+        const curCtx = configService.getOllamaNumCtx() ?? 0
+        const raise = recommended && recommended > curCtx ? recommended : curCtx * 2
+        setMessages((prev) => [...prev, {
+          role: 'assistant',
+          content: `⏹️ ${i18nService.t('Stopped: the context window is full and the model kept being cut off mid-reply. Start a new chat, or raise num_ctx and retry.')}`,
+          timestamp: Date.now(),
+          isError: true,
+          canRaiseNumCtx: raise,
         }])
       } else if ((agentState.editsAttempted ?? 0) > 0
         && (agentState.editsApplied ?? 0) === 0
@@ -3315,11 +3447,10 @@ const Chat: React.FC<ChatProps> = ({ onOpenSettings, chatFocus, onToggleFocus })
                   {t('Retry in code mode')}
                 </button>
               )}
-              {item.m.role === 'assistant' && item.m.canRaiseNumCtx && item.index === messages.length - 1 && (
+              {item.m.role === 'assistant' && item.m.canRaiseNumCtx != null && !isLoading && (
                 <button
                   className="retry-code-mode-button"
                   onClick={() => handleRaiseNumCtx(item.m.canRaiseNumCtx!)}
-                  disabled={isLoading}
                 >
                   {t('Raise num_ctx to {n} for this session and retry').replace('{n}', String(item.m.canRaiseNumCtx))}
                 </button>

@@ -56,10 +56,16 @@ const mockState = { replies: [], captured: [], delayMs: 0 }
 
 // One assistant message as Ollama's NDJSON stream: a content chunk then a
 // done:true terminator (eval counts mirror real responses). A reply may
-// also be {text, input} to simulate an over-context prompt.
-const ollamaReply = (text, input = 10) =>
+// also be {text, input, output, doneReason} to simulate an over-context
+// prompt or a token-limit cut (done_reason 'length').
+const ollamaReply = (text, input = 10, output = 10, doneReason) =>
   JSON.stringify({ message: { role: 'assistant', content: text }, done: false }) + '\n' +
-  JSON.stringify({ done: true, prompt_eval_count: input, eval_count: 10 }) + '\n'
+  JSON.stringify({
+    done: true,
+    prompt_eval_count: input,
+    eval_count: output,
+    ...(doneReason ? { done_reason: doneReason } : {}),
+  }) + '\n'
 
 // Install the intercepts on a page. Routes survive reloads, so this only
 // needs to run once per launch - before the first reload in launchApp.
@@ -83,10 +89,12 @@ async function installOllamaMock(page) {
     const entry = mockState.replies.length ? mockState.replies.shift() : 'E2E_DONE'
     const text = typeof entry === 'string' ? entry : entry.text
     const input = typeof entry === 'string' ? 10 : (entry.input ?? 10)
+    const output = typeof entry === 'string' ? 10 : (entry.output ?? 10)
+    const doneReason = typeof entry === 'string' ? undefined : entry.doneReason
     const respond = () => route.fulfill({
       status: 200,
       contentType: 'application/x-ndjson',
-      body: ollamaReply(text, input),
+      body: ollamaReply(text, input, output, doneReason),
     })
     if (mockState.delayMs) setTimeout(respond, mockState.delayMs)
     else await respond()
@@ -1218,6 +1226,217 @@ test('V-19 digest reminds to mark verified items', async () => {
     const body = reqs[1].replace(/\\"/g, '"')
     assert.ok(body.includes('mark the matching items "- [x]"'),
       'verified-change reminder missing from digest:\n' + body.slice(0, 400))
+  } finally { await app.close() }
+})
+
+// V-20 (context exhaustion): a 'length' cut with prompt+reply already
+// at the num_ctx ceiling cannot recover by continuing - the next
+// prompt is strictly larger. The run must stop once and offer the
+// num_ctx raise button instead of churning truncated replies.
+test('V-20 length cut at a saturated window stops the run', async () => {
+  const tmp = mkTmp('tsp-v20-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      // num_ctx is 8192 in the e2e profile: 7000 + 1500 >= 95%.
+      { text: '// WRITE_FILE: f.js\nconst x = 1', input: 7000, output: 1500, doneReason: 'length' },
+      'SHOULD_NOT_REACH',
+    ], reqs)
+    await sendChat(page, 'create f.js')
+    await waitForMarker(page, 'コンテキストウィンドウが満杯')
+    // Give a continuation (if any) a moment to fire - none may.
+    await new Promise((r) => setTimeout(r, 3000))
+    assert.strictEqual(reqs.length, 1,
+      `run continued past context exhaustion (${reqs.length} calls)`)
+    // The raise button offers the guide value (16384 for gemma4:e4b).
+    assert.ok(
+      await page.locator('.retry-code-mode-button', { hasText: '16384' }).count() >= 1,
+      'no num_ctx raise button after exhaustion')
+  } finally { await app.close() }
+})
+
+// V-21 (danger-zone warning): the prompt crossing ~80% of num_ctx is
+// the last point where a normal reply still fits - warn once before
+// the overflow notice ever gets a chance to fire.
+test('V-21 prompt at 80% of num_ctx shows the nearly-full warning', async () => {
+  const tmp = mkTmp('tsp-v21-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    // 6600 >= 80% of 8192 but below the limit - no overflow notice.
+    await mockModel(page, [{ text: 'V21_DONE', input: 6600 }])
+    await sendChat(page, 'hello')
+    await waitForMarker(page, 'V21_DONE')
+    const msgs = await messagesText(page)
+    assert.ok(msgs.includes('コンテキストウィンドウが残り少なくなっています'),
+      'no danger-zone warning:\n' + msgs)
+    assert.ok(!msgs.includes('プロンプトがnum_ctxを超過'),
+      'overflow notice fired below the limit:\n' + msgs)
+  } finally { await app.close() }
+})
+
+// V-22 (proactive ctx guide): a known model running below its
+// recommended num_ctx gets a one-time notice with the raise button at
+// run start - the Settings guide alone is too easy to miss.
+test('V-22 model below recommended num_ctx is nudged once per session', async () => {
+  const tmp = mkTmp('tsp-v22-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    await mockModel(page, ['V22_DONE', 'V22_DONE2'])
+    await sendChat(page, 'hello')
+    await waitForMarker(page, 'V22_DONE')
+    let msgs = await messagesText(page)
+    assert.ok(msgs.includes('推奨: 16384'),
+      'no proactive ctx guide:\n' + msgs)
+    await sendChat(page, 'again')
+    await waitForMarker(page, 'V22_DONE2')
+    msgs = await messagesText(page)
+    assert.strictEqual(msgs.split('コンテキストウィンドウを大きくすると安定します').length - 1, 1,
+      'ctx guide repeated on the second send')
+  } finally { await app.close() }
+})
+
+// V-23 (nested plan items gate): a just-checked sub-item ("- [ ] 4.1"
+// under "- [ ] 4.") is a boundary too - otherwise a fine-grained WBS
+// gets burned through in one run because the phase gate only sees
+// top-level items. The digest also names the first open leaf as the
+// current step so the rest of the list no longer reads as a work queue.
+test('V-23 nested plan item completion gates the next sub-item', async () => {
+  const tmp = mkTmp('tsp-v23-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'),
+    '# Plan\n' +
+    '- [x] 1. setup\n' +
+    '- [ ] 4. big task\n' +
+    '  - [ ] 4.1 sub one\n' +
+    '  - [ ] 4.2 sub two\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// READ_FILE: develop-plan.md',
+      '// EDIT_FILE: develop-plan.md\n' +
+      '<<<<<<< SEARCH\n  - [ ] 4.1 sub one\n=======\n' +
+      '  - [x] 4.1 sub one\n>>>>>>> REPLACE\n// END_EDIT_FILE\n' +
+      '// LIST_FILES: .',
+      'V23_DONE',
+    ], reqs)
+    await sendChat(page, 'finish 4.1 and continue')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    // The digest names the deepest first open item as the current step.
+    assert.ok(reqs[0]?.includes('Current step: \\"4.1 sub one\\"'),
+      'digest did not name the current step:\n' + reqs[0])
+    await page.click('.approve-button')
+    await page.waitForSelector('.process-approval', { timeout: 30000 })
+    const body = await page.locator('.process-approval .process-question').innerText()
+    assert.ok(body.includes('4.1 sub one') && body.includes('4.2 sub two'),
+      'gate question missing sub-item names:\n' + body)
+    await page.click('.process-approval .approve-button')
+    await waitForMarker(page, 'V23_DONE')
+  } finally { await app.close() }
+})
+
+// V-24 (checkbox + text edit in one): marking "- [x]" while ALSO
+// rewriting the item's own trailing fields ("status: open" -> "done")
+// changes the normalized text - plain text matching then never sees
+// the flip and the sub-item gate silently never fires (observed on a
+// real run where the WBS items carried progress fields). Match by the
+// item's leading number instead.
+test('V-24 sub-item gate survives a same-edit text change', async () => {
+  const tmp = mkTmp('tsp-v24-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'develop-plan.md'),
+    '# Plan\n' +
+    '- [x] 1. setup\n' +
+    '- [ ] 4. big task\n' +
+    '  - [ ] 4.1 sub one (status: open)\n' +
+    '  - [ ] 4.2 sub two (status: open)\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '// READ_FILE: develop-plan.md',
+      '// EDIT_FILE: develop-plan.md\n' +
+      '<<<<<<< SEARCH\n  - [ ] 4.1 sub one (status: open)\n=======\n' +
+      '  - [x] 4.1 sub one (status: done)\n>>>>>>> REPLACE\n// END_EDIT_FILE\n' +
+      '// LIST_FILES: .',
+      'V24_DONE',
+    ], reqs)
+    await sendChat(page, 'finish 4.1 and continue')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    await page.waitForSelector('.process-approval', { timeout: 30000 })
+    const body = await page.locator('.process-approval .process-question').innerText()
+    assert.ok(body.includes('4.1') && body.includes('4.2'),
+      'gate question missing sub-item names:\n' + body)
+    await page.click('.process-approval .approve-button')
+    await waitForMarker(page, 'V24_DONE')
+  } finally { await app.close() }
+})
+
+// V-25 (scoped deferral = boundary): "4.1だけ実装して" then the model
+// applies the write and ends with a declarative "次に4.2を実装します" -
+// the anti-stall continuation used to push the run straight past the
+// user's boundary. With work applied, the announcement IS the stop.
+test('V-25 scoped run stops at a declarative next-item ending', async () => {
+  const tmp = mkTmp('tsp-v25-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '4.1の実装が完了しました。\n' +
+      '// WRITE_FILE: f.js\nconsole.log("one")\n// END_WRITE_FILE\n' +
+      '次に4.2を実装します。',
+      'SHOULD_NOT_REACH',
+    ], reqs)
+    await sendChat(page, '4.1だけ実装して')
+    await page.waitForSelector('.file-edit-approval', { timeout: 30000 })
+    await page.click('.approve-button')
+    // The boundary stop ends the run - no continuation request is sent.
+    await waitForMarker(page, 'モデルの質問で停止')
+    assert.strictEqual(reqs.length, 1,
+      `a continuation request went out past the boundary:\n${reqs[1] ?? ''}`)
+    assert.ok(fs.readFileSync(path.join(proj, 'f.js'), 'utf8').includes('console.log("one")'),
+      'the applied write is missing on disk')
+  } finally { await app.close() }
+})
+
+// V-26 ("か。" permission question): Japanese models close polite
+// questions with 。 ("実装してもよろしいでしょうか。") - the boundary
+// check only looked for ?/？ and let the run steamroll a real stop.
+test('V-26 scoped run stops at a か。 question ending', async () => {
+  const tmp = mkTmp('tsp-v26-')
+  const proj = path.join(tmp, 'proj')
+  fs.mkdirSync(proj)
+  fs.writeFileSync(path.join(proj, 'f.js'), 'x\n')
+  const { app, page } = await launchApp({ profileDir: mkTmp('tsp-prof-') })
+  try {
+    await openProject(page, proj)
+    const reqs = []
+    await mockModel(page, [
+      '実装方針を確認します。\n// READ_FILE: f.js\nこの方針で実装を進めてもよろしいでしょうか。',
+      'SHOULD_NOT_REACH',
+    ], reqs)
+    await sendChat(page, '4.1だけ実装して')
+    await waitForMarker(page, 'モデルの質問で停止')
+    assert.strictEqual(reqs.length, 1,
+      `a continuation request went out past the boundary:\n${reqs[1] ?? ''}`)
   } finally { await app.close() }
 })
 

@@ -58,6 +58,17 @@ export function normPlanItemText(text: string): string {
     .toLowerCase()
 }
 
+// Leading hierarchical numbering ("4.1", "2") is the most stable
+// identity a plan item has: models routinely rewrite the item's own
+// trailing fields ("進捗: 未実施" -> "作業完了", "(priority: ...)") in
+// the SAME edit that flips its checkbox, which changes the normalized
+// text and defeats text matching entirely (observed on a real run: the
+// phase gate never saw the completions). Numberless items return null
+// and keep the text fallback.
+export function planItemId(text: string): string | null {
+  return /^\s*(\d+(?:\.\d+)*)/.exec(text)?.[1] ?? null
+}
+
 export interface PlanPhase {
   // Top-level item text (numbered plans) or heading text (heading plans).
   title: string
@@ -101,8 +112,12 @@ const phaseOpen = (p: PlanPhase) => p.items.some(i => !i.checked)
 
 // A phase transition worth a user gate: a phase that still had open
 // items is now fully checked AND a later phase still has open items.
-// Returns the titles for the approval prompt; null when no transition
-// (or when the whole plan just finished - nothing left to gate on).
+// Nested ("- [ ] 4.1 ..." under "- [ ] 4. ...") items gate too: a
+// just-checked sub-item with a still-open item later in the same phase
+// is a boundary (observed: fine-grained WBS plans run through every
+// sub-task in one go because nothing gates between them). Returns the
+// titles for the approval prompt; null when no transition (or when the
+// whole plan just finished - nothing left to gate on).
 export function justCompletedPhase(
   oldContent: string,
   newContent: string,
@@ -111,11 +126,33 @@ export function justCompletedPhase(
   const newPhases = planPhases(parsePlanItems(newContent))
   for (let i = 0; i < newPhases.length; i++) {
     const np = newPhases[i]
-    const op = oldPhases.find(p => p.title === np.title)
+    const npId = planItemId(np.title)
+    const op = oldPhases.find(p =>
+      p.title === np.title ||
+      (npId !== null && planItemId(p.title) === npId))
     if (!op) continue
     if (!phaseDone(op) && phaseDone(np)) {
       const next = newPhases.slice(i + 1).find(phaseOpen)
       if (next) return { done: np.title, next: next.title }
+    }
+  }
+  const flipped = new Map<string, number>()
+  for (const it of newlyCheckedItems(oldContent, newContent)) {
+    const k = normPlanItemText(it.text)
+    flipped.set(k, (flipped.get(k) ?? 0) + 1)
+  }
+  for (const phase of newPhases) {
+    // Within a phase, report the last just-checked item: when one edit
+    // flips several, the boundary closest to the remaining work is the
+    // one the user is being asked to cross.
+    for (let j = phase.items.length - 1; j >= 0; j--) {
+      const it = phase.items[j]
+      if (!it.checked || it.depth === 0) continue
+      const left = flipped.get(normPlanItemText(it.text)) ?? 0
+      if (left === 0) continue
+      flipped.set(normPlanItemText(it.text), left - 1)
+      const next = phase.items.slice(j + 1).find(o => !o.checked)
+      if (next) return { done: it.text, next: next.text }
     }
   }
   return null
@@ -129,12 +166,32 @@ export function newlyCheckedItems(
   newContent: string,
 ): PlanItem[] {
   const open = new Map<string, PlanItem>()
+  const openById = new Map<string, PlanItem>()
   for (const it of parsePlanItems(oldContent)) {
-    if (!it.checked) open.set(normPlanItemText(it.text), it)
+    if (!it.checked) {
+      open.set(normPlanItemText(it.text), it)
+      const id = planItemId(it.text)
+      if (id) openById.set(id, it)
+    }
   }
   const out: PlanItem[] = []
   for (const it of parsePlanItems(newContent)) {
-    if (it.checked && open.delete(normPlanItemText(it.text))) out.push(it)
+    if (!it.checked) continue
+    const id = planItemId(it.text)
+    if (open.delete(normPlanItemText(it.text))) {
+      if (id) openById.delete(id)
+      out.push(it)
+      continue
+    }
+    // The item kept its number but its text changed in the same edit -
+    // still the same work item. Id matching runs second so a duplicated
+    // number cannot shadow an unchanged item.
+    const byId = id ? openById.get(id) : undefined
+    if (byId) {
+      openById.delete(id!)
+      open.delete(normPlanItemText(byId.text))
+      out.push(it)
+    }
   }
   return out
 }
@@ -191,11 +248,25 @@ export function formatPlanDigest(
     emitted++
   }
   let body = lines.join('\n')
-  if (body.length <= maxChars || emitted === 0) return body + '\n'
-  // Over budget: collapse to per-heading open counts.
-  const groups = planPhases(items)
-    .filter(phaseOpen)
-    .map(p => `${p.title || '(no heading)'}: ${p.items.filter(i => !i.checked).length} open`)
-  body = `${header}\n${groups.join('; ')}\n(plan too large for full digest - emit "// READ_FILE: ${relPath}" for details)`
+  if (body.length > maxChars && emitted > 0) {
+    // Over budget: collapse to per-heading open counts.
+    const groups = planPhases(items)
+      .filter(phaseOpen)
+      .map(p => `${p.title || '(no heading)'}: ${p.items.filter(i => !i.checked).length} open`)
+    body = `${header}\n${groups.join('; ')}\n(plan too large for full digest - emit "// READ_FILE: ${relPath}" for details)`
+  }
+  // Point at the one item the model should be working on now: the first
+  // open leaf (an unchecked item with no unchecked children). A flat
+  // "Open items" list reads as a work queue and small models treat the
+  // remaining items as their mandate - naming the current step keeps
+  // the rest visibly off-limits until the gate approves them.
+  const openLeaf = items.find((it, idx) =>
+    !it.checked && (!items[idx + 1] || items[idx + 1].depth <= it.depth))
+  if (openLeaf) {
+    const more = items.some(i => !i.checked && i !== openLeaf)
+    const t = openLeaf.text.length > 80 ? openLeaf.text.slice(0, 77) + '...' : openLeaf.text
+    body += `\nCurrent step: "${t}" - unless the user directed otherwise, work only on this item now` +
+      (more ? '; checking it off asks the user before the next item starts.' : '.') + '\n'
+  }
   return body + '\n'
 }
